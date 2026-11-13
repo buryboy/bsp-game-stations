@@ -114,6 +114,7 @@ function say(k, s) {
   return 'Computers: learn, then test. Table: answer the sheet for the station you just played, no talking to other pairs.';
 }
 function draw() {
+  if (typeof sync === "undefined") return;
   const s = sync.session, now = sync.now(), k = lessonClock(s, now);
   $('#net').innerHTML = sync.local ? '<span class="warn">offline mode (this computer only)</span>' : sync.ok ? '<span class="good">● synced</span>' : `<span class="bad">● no connection: ${sync.err}</span>`;
   let ph = 'Not started', t = '--:--', pct = 0, cls = '';
