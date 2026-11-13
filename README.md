@@ -36,6 +36,10 @@ Everything still works without the sync server. Each station is started on its o
 
 `games/NN-name/index.html?standalone=1`. Then F2 starts a round, F3 pauses, F4 skips Learn and F6 ends. Add `&R=120&learn=30` for a short round.
 
+## If a game runs slowly on a school PC
+
+Station 5 is the only full 3D game. Add `?aa=0&sh=0` to switch off anti-aliasing and shadows: in `lib/stations.js`, change its path to `games/05-racer/?aa=0&sh=0`. Run every game once on a classroom machine before the lesson.
+
 ## For future topics
 
 `docs/SPEC.md` is the build brief for a station game and `docs/CONTENT.md` holds the facts. Swap both, rebuild the games, and the hub, teacher dashboard and sync stay the same.

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en-GB"><head><meta charset="utf-8"><title>Factory Floor Racer — Station 5</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap">
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;font-family:"Inter","Segoe UI",system-ui,sans-serif}
+  /* isometric-pastel backdrop: warm-to-lavender gradient, faint dot grid, soft glow */
+  body{background:
+    radial-gradient(ellipse at 52% 52%, rgba(255,255,255,.75), rgba(255,255,255,0) 60%),
+    radial-gradient(rgba(120,110,170,.16) 1.2px, transparent 1.6px) 0 0/28px 28px,
+    linear-gradient(135deg,#f6efe8 0%,#efeaf4 55%,#e4e3f3 100%)}
+  canvas{display:block}
+</style></head><body>
+<canvas id="gl" width="1280" height="720"></canvas>
+<canvas id="hud" width="1280" height="720"></canvas>
+<script src="../../lib/harness.js"></script>
+<script src="../../lib/sound.js"></script>
+<script src="../../lib/gs-bridge.js"></script>
+<script type="module" src="./main.js"></script>
+</body></html>
