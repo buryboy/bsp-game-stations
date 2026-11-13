@@ -1,0 +1,27 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Space+Mono:wght@400;700&display=swap');
+:root { --ink: #eef4ff; --dim: rgba(238,244,255,.55); --line: rgba(238,244,255,.8); --hot: #ffd84a; --red: #ff8a7a; --ok: #8affc1; }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; color: var(--ink); font-family: 'IBM Plex Mono', ui-monospace, Consolas, monospace; background: #163a70; }
+body { overflow: hidden; }
+.sheet { position: fixed; inset: 14px; border: 2px solid var(--line); outline: 1px solid var(--dim); outline-offset: 6px; overflow: auto; padding: 26px 34px 90px; }
+.zones { position: fixed; inset: 0; pointer-events: none; font: 600 11px 'Space Mono', monospace; color: var(--dim); }
+.zones span { position: absolute; }
+h1, h2, h3, .mono { font-family: 'Space Mono', ui-monospace, monospace; font-weight: 700; letter-spacing: 1px; margin: 0; }
+h1 { font-size: 42px; text-transform: uppercase; }
+h2 { font-size: 22px; text-transform: uppercase; }
+.sub { color: var(--dim); font-size: 15px; margin-top: 6px; }
+.btn { font: 700 16px 'Space Mono', monospace; color: var(--ink); background: rgba(255,255,255,.04); border: 2px solid var(--line); padding: 10px 16px; cursor: pointer; text-transform: uppercase; letter-spacing: 1px; }
+.btn:hover { background: rgba(255,255,255,.14); }
+.btn.hot { border-color: var(--hot); color: var(--hot); }
+.btn.red { border-color: var(--red); color: var(--red); }
+.btn:disabled { opacity: .35; cursor: default; }
+.grid { display: grid; gap: 16px; }
+.card { border: 1.5px solid var(--line); padding: 14px 16px; position: relative; background: rgba(255,255,255,.02); }
+.card .no { position: absolute; top: -1px; right: -1px; border-left: 1.5px solid var(--line); border-bottom: 1.5px solid var(--line); padding: 2px 10px; font: 700 22px 'Space Mono', monospace; }
+.leader { color: var(--dim); font-size: 13px; }
+.titleblock { position: fixed; right: 14px; bottom: 14px; border-top: 2px solid var(--line); border-left: 2px solid var(--line); display: grid; grid-template-columns: auto auto; font-size: 12px; background: rgba(10,30,70,.35); }
+.titleblock div { padding: 4px 10px; border-right: 1px solid var(--dim); border-bottom: 1px solid var(--dim); }
+.titleblock b { font-family: 'Space Mono', monospace; }
+input, select { font: 600 16px 'IBM Plex Mono', monospace; background: transparent; color: var(--ink); border: 0; border-bottom: 2px solid var(--line); padding: 4px 6px; width: 90px; }
+select option { color: #000; }
+.dim { color: var(--dim); }

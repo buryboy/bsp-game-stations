@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Game Stations</title>
+<link rel="stylesheet" href="lib/blueprint.css">
+<style>
+  #pick .grid { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); margin-top: 28px; }
+  #pick .card { cursor: pointer; min-height: 120px; }
+  #pick .card:hover { background: rgba(255,255,255,.1); }
+  #pick .card h3 { font-size: 22px; margin: 0 30px 6px 0; }
+  #game { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; display: none; background: #000; }
+  #gate { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; text-align: center; cursor: pointer; z-index: 10; }
+  #gate.dim { background: rgba(10,30,70,.82); }
+  #gate h1 { font-size: 56px; margin: 8px 0 12px; }
+  #gate .big { font: 700 26px 'Space Mono', monospace; border: 2px solid var(--line); padding: 16px 30px; margin-top: 26px; }
+  #gate .small { margin-top: 30px; font-size: 13px; color: var(--dim); }
+  #gate a { color: var(--dim); }
+  #net { position: fixed; left: 10px; bottom: 8px; font-size: 12px; color: var(--dim); z-index: 11; pointer-events: none; }
+</style>
+</head><body>
+<div class="zones" id="zones"></div>
+
+<!-- 1. choose what this computer is -->
+<div class="sheet" id="pick" style="display:none">
+  <h1 id="ttl">Game Stations</h1>
+  <div class="sub" id="crs"></div>
+  <div class="sub" style="margin-top:14px">Set up each computer once: click the station this computer is. It's remembered on this machine.</div>
+  <div class="grid" id="cards"></div>
+  <div style="margin-top:28px;display:flex;gap:14px;flex-wrap:wrap">
+    <a class="btn hot" href="teacher.html">Teacher dashboard →</a>
+    <button class="btn" id="setapi">Sync link…</button>
+  </div>
+  <div class="sub" id="apist" style="margin-top:12px"></div>
+</div>
+
+<!-- 2. a station -->
+<iframe id="game" allow="fullscreen; autoplay" title="Station game"></iframe>
+<div id="gate"></div>
+<div id="net"></div>
+
+<div class="titleblock" id="tb" style="display:none"><div>DWG</div><div><b>GAME HUB</b></div><div>SUBJECT</div><div><b id="tbs"></b></div><div>SCALE</div><div>1:1</div></div>
+
+<script src="lib/harness.js"></script>
+<script src="lib/blueprint.js"></script>
+<script src="lib/stations.js"></script>
+<script src="lib/sync.js"></script>
+<script>
+const $ = (s) => document.querySelector(s);
+Blueprint.paper(document.body);
+const qs = new URLSearchParams(location.search);
+if (qs.get('station') === 'reset') localStorage.removeItem('gs.station');
+const pickN = Number(qs.get('station')) || Number(localStorage.getItem('gs.station')) || 0;
+const zones = $('#zones');
+['A','B','C','D'].forEach((z,i)=>{ zones.innerHTML += `<span style="left:${12+i*25}%;top:2px">${z}</span><span style="left:${12+i*25}%;bottom:2px">${z}</span>`; });
+[1,2,3].forEach((z,i)=>{ zones.innerHTML += `<span style="top:${18+i*30}%;left:3px">${z}</span><span style="top:${18+i*30}%;right:3px">${z}</span>`; });
+
+// ---------------- picker ----------------
+function showPick() {
+  $('#pick').style.display = 'block'; $('#tb').style.display = 'grid';
+  $('#ttl').textContent = LESSON.title + ' — game stations'; $('#crs').textContent = LESSON.course; $('#tbs').textContent = LESSON.title.toUpperCase();
+  $('#cards').innerHTML = LESSON.stations.map((s) => `<div class="card" data-n="${s.n}"><div class="no">${s.n}</div><h3>${s.name}</h3><div>${s.topic}</div><div class="leader" style="margin-top:8px">${s.style} · ${s.mode === 'coop' ? 'co-op' : '1 v 1'}</div><div class="leader"><a href="${s.path}?standalone=1" onclick="event.stopPropagation()" style="color:inherit">test on its own ↗</a></div></div>`).join('');
+  $('#cards').onclick = (e) => { const c = e.target.closest('.card'); if (!c) return; localStorage.setItem('gs.station', c.dataset.n); location.search = ''; };
+  const api = localStorage.getItem('gs.api') || LESSON.backend;
+  $('#apist').textContent = api ? 'Sync: connected to the teacher dashboard (' + api.slice(0, 48) + '…)' : 'Sync: OFFLINE MODE — no sync link set. Each station is started on its own keyboard (Ctrl+Shift+S start, Ctrl+Shift+P pause).';
+  $('#setapi').onclick = () => { const v = prompt('Paste the Apps Script web-app link (ends in /exec). Leave empty to clear.', localStorage.getItem('gs.api') || ''); if (v === null) return; v.trim() ? localStorage.setItem('gs.api', v.trim()) : localStorage.removeItem('gs.api'); showPick(); };
+}
+
+// ---------------- station ----------------
+function runStation(n) {
+  const st = LESSON.stations.find((s) => s.n === n);
+  const fr = $('#game'), gate = $('#gate');
+  document.title = `Station ${n} · ${st.name}`;
+  fr.src = st.path; fr.style.display = 'block';
+  let lastStatus = {}, armed = false;
+  const sync = new Sync({ role: 'station', station: n, onUpdate: () => {} });
+  addEventListener('message', (e) => { if (e.data && e.data.type === 'gs-status') lastStatus = e.data; });
+
+  function gateView() {
+    const fs = !!document.fullscreenElement;
+    if (fs) { gate.style.display = 'none'; return; }
+    gate.style.display = 'flex'; gate.className = armed ? 'dim' : 'dim';
+    gate.innerHTML = `<div class="sub">STATION ${n}</div><h1>${st.name}</h1><div>${st.topic}</div>
+      <div class="big">${armed ? '▶ Click to go back to full screen' : '▶ Click to start (full screen)'}</div>
+      <div class="small">Esc leaves full screen. ${sync.local ? 'Offline mode: Ctrl+Shift+S start · Ctrl+Shift+P pause · Ctrl+Shift+N skip' : ''}<br><br>
+      <a href="?station=reset" onclick="event.stopPropagation()">change which station this computer is</a></div>`;
+  }
+  gate.onclick = async () => {
+    armed = true;
+    try { await document.documentElement.requestFullscreen({ navigationUI: 'hide' }); } catch (e) {}
+    try { await navigator.keyboard?.lock?.(); } catch (e) {}
+    gateView(); fr.focus(); fr.contentWindow?.focus();
+  };
+  document.addEventListener('fullscreenchange', () => { gateView(); if (document.fullscreenElement) { fr.focus(); fr.contentWindow?.focus(); } });
+  addEventListener('contextmenu', (e) => e.preventDefault());
+  // keep keyboard focus inside the game
+  setInterval(() => { if (document.fullscreenElement && document.activeElement !== fr) { fr.focus(); } }, 1000);
+
+  // offline shortcuts work wherever focus is (the game frame is same-origin)
+  function keys(e) {
+    if (!(e.ctrlKey && e.shiftKey)) return;
+    if (e.code === 'KeyS') { e.preventDefault(); sync.cmd('start', { R: LESSON.playSeconds, M: LESSON.moveSeconds, rounds: LESSON.rounds }); }
+    if (e.code === 'KeyP') { e.preventDefault(); sync.cmd(sync.session && sync.session.pausedAt ? 'resume' : 'pause'); }
+    if (e.code === 'KeyN') { e.preventDefault(); sync.cmd('skip'); }
+  }
+  if (sync.local) { addEventListener('keydown', keys); fr.addEventListener('load', () => fr.contentWindow.addEventListener('keydown', keys)); }
+
+  // send the round state to the game 4x a second
+  setInterval(() => {
+    const s = sync.session, k = lessonClock(s, sync.now());
+    let m = { type: 'gs-state', active: false, roundId: 0, t: 0, R: (s && s.R) || LESSON.playSeconds, paused: false, banner: '' };
+    if (k.state === 'play' || k.state === 'move') {
+      m = { type: 'gs-state', active: true, roundId: k.roundId, t: k.tb, R: s.R, paused: k.paused || !!(s.stPause && s.stPause[n]), banner: s.banner || '' };
+    }
+    fr.contentWindow && fr.contentWindow.postMessage(m, '*');
+    sync.status = Object.assign({}, lastStatus, { fs: !!document.fullscreenElement, vis: document.visibilityState, at: Date.now() });
+    $('#net').textContent = sync.local ? 'offline mode' : sync.ok ? '' : '⚠ no connection to the teacher dashboard — retrying';
+  }, 250);
+  gateView();
+}
+
+if (pickN && LESSON.stations.find((s) => s.n === pickN)) runStation(pickN); else showPick();
+</script>
+</body></html>

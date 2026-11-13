@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Teacher · Game Stations</title>
+<link rel="stylesheet" href="lib/blueprint.css">
+<style>
+  .top { display: grid; grid-template-columns: 1.1fr 1fr; gap: 26px; margin-top: 18px; }
+  .clock { border: 2px solid var(--line); padding: 16px 22px; position: relative; }
+  .clock .t { font: 700 120px/1 'Space Mono', monospace; letter-spacing: 2px; }
+  .clock .ph { font: 700 30px 'Space Mono', monospace; text-transform: uppercase; }
+  .clock .ph.move { color: var(--hot); }
+  .clock .ph.paused { color: var(--red); }
+  .clock .say { font-size: 19px; margin-top: 8px; min-height: 54px; }
+  .bar { height: 6px; border: 1px solid var(--line); margin-top: 10px; } .bar i { display: block; height: 100%; background: var(--ink); }
+  .ctl { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+  .tiles { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); margin-top: 24px; }
+  .tile h3 { font-size: 17px; margin: 0 34px 4px 0; }
+  .tile .sc { font: 700 34px 'Space Mono', monospace; margin: 4px 0; }
+  .tile .flags { font-size: 13px; min-height: 18px; }
+  .tile.off { opacity: .45; }
+  .tile.paused { border-color: var(--red); }
+  .warn { color: var(--hot); } .bad { color: var(--red); } .good { color: var(--ok); }
+  .settings label { margin-right: 16px; font-size: 14px; }
+  #proj { position: fixed; inset: 0; display: none; z-index: 50; align-items: center; justify-content: center; flex-direction: column; text-align: center; background: rgba(10,30,70,.9); cursor: pointer; }
+  #proj .t { font: 700 30vh/1 'Space Mono', monospace; }
+  #proj .ph { font: 700 7vh 'Space Mono', monospace; text-transform: uppercase; }
+  #proj .say { font-size: 3.6vh; margin-top: 2vh; max-width: 80vw; }
+  .rot { font-size: 14px; line-height: 1.6; }
+  .rot table { border-collapse: collapse; margin-top: 6px; } .rot td, .rot th { border: 1px solid var(--dim); padding: 2px 8px; text-align: center; }
+</style>
+</head><body>
+<div class="sheet">
+  <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:10px">
+    <div><h1>Teacher control</h1><div class="sub" id="crs"></div></div>
+    <div><span id="net" class="dim"></span> &nbsp; <button class="btn" id="projBtn">Projector view</button> <a class="btn" href="index.html?station=reset">Hub</a></div>
+  </div>
+
+  <div class="top">
+    <div class="clock">
+      <div class="ph" id="ph">Not started</div>
+      <div class="t" id="t">--:--</div>
+      <div class="bar"><i id="bar" style="width:0"></i></div>
+      <div class="say" id="say"></div>
+      <div class="ctl">
+        <button class="btn hot" id="bStart">▶ Start lesson</button>
+        <button class="btn red" id="bPause">⏸ Pause all</button>
+        <button class="btn" id="bLook">👀 Look up!</button>
+        <button class="btn" id="bResume">▶ Resume</button>
+        <button class="btn" id="bSkip">⏭ Skip to next phase</button>
+        <button class="btn" id="bAdd">+1 min</button>
+        <button class="btn red" id="bEnd">■ End</button>
+      </div>
+    </div>
+    <div>
+      <h2>Set-up</h2>
+      <div class="settings" style="margin-top:10px">
+        <label>Play/write <input id="sR" type="number" min="1" max="20" step="0.5" value="5"> min</label>
+        <label>Move <input id="sM" type="number" min="0" max="120" step="5" value="30"> s</label>
+        <label>Rounds <input id="sN" type="number" min="1" max="14" value="8"></label>
+      </div>
+      <div class="rot" id="rot" style="margin-top:14px"></div>
+    </div>
+  </div>
+
+  <div class="grid tiles" id="tiles"></div>
+  <div class="sub" style="margin-top:18px">Tip: "Look up!" pauses every screen with a message; click a tile's ⏸ to pause just that station.</div>
+</div>
+<div id="proj"><div class="ph" id="pph"></div><div class="t" id="pt"></div><div class="say" id="psay"></div><div class="sub" style="margin-top:3vh">click to close</div></div>
+<div class="titleblock"><div>DWG</div><div><b>TEACHER</b></div><div>SUBJECT</div><div><b id="tbs"></b></div></div>
+
+<script src="lib/harness.js"></script>
+<script src="lib/blueprint.js"></script>
+<script src="lib/stations.js"></script>
+<script src="lib/sync.js"></script>
+<script>
+const $ = (s) => document.querySelector(s);
+Blueprint.paper(document.body);
+$('#crs').textContent = LESSON.course + ' · ' + LESSON.title; $('#tbs').textContent = LESSON.title.toUpperCase();
+$('#sR').value = LESSON.playSeconds / 60; $('#sM').value = LESSON.moveSeconds; $('#sN').value = LESSON.rounds;
+
+const hasApi = new URLSearchParams(location.search).get('api') || localStorage.getItem('gs.api') || LESSON.backend;
+let pin = localStorage.getItem('gs.pin') || '';
+if (hasApi && !pin) { pin = prompt('Teacher PIN (set in the Apps Script project)') || ''; localStorage.setItem('gs.pin', pin); }
+const sync = new Sync({ role: 'teacher', pin, onUpdate: draw });
+
+const mmss = (s) => { s = Math.ceil(Math.max(0, s)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+async function cmd(c, extra) { try { await sync.cmd(c, extra); } catch (e) { alert('Command failed: ' + e.message + (String(e.message).includes('PIN') ? '\n\nClear the PIN and try again.' : '')); if (String(e.message).includes('PIN')) localStorage.removeItem('gs.pin'); } draw(); }
+$('#bStart').onclick = () => { const s = sync.session; if (s && s.running && !confirm('Restart the whole lesson from round 1?')) return; cmd('start', { R: Math.round(+$('#sR').value * 60), M: +$('#sM').value, rounds: +$('#sN').value }); };
+$('#bPause').onclick = () => { const m = prompt('Message on every screen (optional):', ''); if (m === null) return; cmd('pause', { msg: m }); };
+$('#bLook').onclick = () => cmd('pause', { msg: 'Eyes on me, please 👀' });
+$('#bResume').onclick = () => cmd('resume');
+$('#bSkip').onclick = () => cmd('skip');
+$('#bAdd').onclick = () => cmd('addmin');
+$('#bEnd').onclick = () => { if (confirm('End the lesson on every station?')) cmd('end'); };
+$('#projBtn').onclick = () => { $('#proj').style.display = 'flex'; document.documentElement.requestFullscreen?.().catch(() => {}); };
+$('#proj').onclick = () => { $('#proj').style.display = 'none'; document.fullscreenElement && document.exitFullscreen(); };
+$('#tiles').onclick = (e) => { const b = e.target.closest('[data-sp]'); if (b) cmd('stpause', { n: b.dataset.sp }); };
+
+function rotation(k, s) {
+  const N = LESSON.stations.length;
+  if (!k.round) return `<b>How the rotation works</b><br>Pairs in two groups. <b>Group A</b> starts on the computers (pair 1 → station 1 … pair 7 → station 7); <b>Group B</b> starts at the table with the starter sheet.<br>Every phase the groups swap. After writing, go to the <b>next station number</b> (7 → 1). The sheet you answer is the station you just played.`;
+  const groupOnPCs = k.round % 2 ? 'A' : 'B';
+  const shift = Math.floor((k.round - 1) / 2);
+  let rows = '';
+  for (let p = 1; p <= N; p++) rows += `<td>${((p - 1 + shift) % N) + 1}</td>`;
+  return `<b>Round ${k.round}:</b> Group <b>${groupOnPCs}</b> on computers · Group <b>${groupOnPCs === 'A' ? 'B' : 'A'}</b> at the table<br>
+    <table><tr><th>${groupOnPCs} pair</th>${[...Array(N)].map((_, i) => `<th>${i + 1}</th>`).join('')}</tr><tr><th>station</th>${rows}</tr></table>`;
+}
+function say(k, s) {
+  if (!s || !s.running) return 'Set the timings, then press Start. Every station starts together.';
+  if (k.state === 'done') return 'All rounds done. Great work!';
+  if (k.paused) return s.banner ? '“' + s.banner + '”' : 'Paused.';
+  if (k.state === 'move') return 'MOVE NOW: computers → table (sheet for the game you just played); table → next station.';
+  return 'Computers: learn, then test. Table: answer the sheet for the station you just played, no talking to other pairs.';
+}
+function draw() {
+  const s = sync.session, now = sync.now(), k = lessonClock(s, now);
+  $('#net').innerHTML = sync.local ? '<span class="warn">offline mode (this computer only)</span>' : sync.ok ? '<span class="good">● synced</span>' : `<span class="bad">● no connection: ${sync.err}</span>`;
+  let ph = 'Not started', t = '--:--', pct = 0, cls = '';
+  if (k.state === 'play') { ph = `Round ${k.round}/${s.rounds} · play & write`; t = mmss(k.left); pct = k.tb / s.R; }
+  if (k.state === 'move') { ph = `Round ${k.round}/${s.rounds} · MOVE!`; t = mmss(k.left); pct = 1; cls = 'move'; }
+  if (k.state === 'done') { ph = 'Finished'; t = '0:00'; }
+  if (k.paused) { ph = '⏸ Paused · ' + ph; cls = 'paused'; }
+  $('#ph').textContent = ph; $('#ph').className = 'ph ' + cls; $('#t').textContent = t; $('#bar').style.width = (pct * 100) + '%';
+  $('#say').textContent = say(k, s);
+  $('#pph').textContent = ph; $('#pph').className = 'ph ' + cls; $('#pt').textContent = t; $('#psay').textContent = say(k, s);
+  $('#rot').innerHTML = rotation(k, s);
+  const running = s && s.running && k.state !== 'done';
+  $('#bPause').disabled = $('#bLook').disabled = !running || k.paused; $('#bResume').disabled = !running || !k.paused;
+  $('#bSkip').disabled = $('#bAdd').disabled = $('#bEnd').disabled = !running;
+  $('#bStart').textContent = running ? '↺ Restart' : '▶ Start lesson';
+  $('#tiles').innerHTML = LESSON.stations.map((st) => {
+    const h = (sync.stations || {})[st.n];
+    const age = h ? (now - h.at) / 1000 : 1e9;
+    const on = sync.local ? null : age < 10;
+    const d = (h && h.d) || {};
+    const sp = s && s.stPause && s.stPause[st.n];
+    const sc = d.scores ? (d.mode === 'coop' ? d.scores[0] + ' pts' : d.scores[0] + ' – ' + d.scores[1]) : '–';
+    const flags = sync.local ? '<span class="dim">no live status offline</span>' : !on ? '<span class="bad">● not connected</span>'
+      : [d.fs ? '<span class="good">● full screen</span>' : '<span class="warn">⚠ left full screen</span>', d.vis === 'hidden' ? '<span class="bad">tab hidden</span>' : '', d.phase ? d.phase.toUpperCase() : ''].filter(Boolean).join(' · ');
+    return `<div class="card tile ${on === false ? 'off' : ''} ${sp ? 'paused' : ''}"><div class="no">${st.n}</div><h3>${st.name}</h3><div class="leader">${st.topic}</div>
+      <div class="sc">${sc}</div><div class="flags">${flags}</div>
+      <button class="btn" data-sp="${st.n}" style="margin-top:8px;padding:4px 10px;font-size:13px" ${running ? '' : 'disabled'}>${sp ? '▶ resume station' : '⏸ pause station'}</button></div>`;
+  }).join('');
+}
+setInterval(draw, 250); draw();
+</script>
+</body></html>
