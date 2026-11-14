@@ -200,7 +200,96 @@
     s.dir = pick.slice();
   }
 
+
+  // ---------------- CPU player 2 (only runs when GS.cpu.on && GS.running) ----------------
+  // One decision per snake step: BFS to a target (nearest reachable monomer, or a chosen gate after "reading" the
+  // question), a safety check against walls/chains, and human-ish flaws that shrink as skill rises: slow reactions,
+  // late turns, missed danger, and answering right with p = 0.35 + 0.6 * skill.
+  const DNAME = { '0,-1': 'up', '0,1': 'down', '-1,0': 'left', '1,0': 'right' };
+  const isGateCell = (g, x, y) => x >= g.cx && x <= g.cx + 2 && y >= g.cy && y <= g.cy + 1;
+  function blockedSet(learn) {
+    const B = new Set();
+    if (learn) return B; // no collisions in LEARN
+    for (const o of S.snakes) { if (o.ghost > 0) continue; const end = o.grow > 0 ? o.body.length : o.body.length - 1; for (let k = 0; k < end; k++) B.add(o.body[k].x + ',' + o.body[k].y); }
+    return B;
+  }
+  function nbr(x, y, d, learn) {
+    let nx = x + d[0], ny = y + d[1];
+    if (learn) { nx = (nx + COLS) % COLS; ny = (ny + S.rows) % S.rows; }
+    else if (nx < 0 || ny < 0 || nx >= COLS || ny >= S.rows) return null;
+    return [nx, ny];
+  }
+  // BFS from the head; returns the first direction of the shortest path to any cell where goal(x,y) is true
+  function bfs(s, goal, avoid, learn) {
+    const B = blockedSet(learn), h = s.body[0], seen = new Set([h.x + ',' + h.y]), Q = [];
+    for (const d of Object.values(DIRS)) {
+      if (d[0] === -s.dir[0] && d[1] === -s.dir[1]) continue;
+      const n = nbr(h.x, h.y, d, learn); if (!n) continue; const k = n[0] + ',' + n[1];
+      if (B.has(k) || avoid(n[0], n[1])) continue; seen.add(k); Q.push([n[0], n[1], d, 1]);
+    }
+    for (let qi = 0; qi < Q.length; qi++) {
+      const [x, y, first, dist] = Q[qi];
+      if (goal(x, y)) return { dir: first, dist };
+      if (dist > 70) continue;
+      for (const d of Object.values(DIRS)) { const n = nbr(x, y, d, learn); if (!n) continue; const k = n[0] + ',' + n[1]; if (seen.has(k) || B.has(k) || avoid(n[0], n[1])) continue; seen.add(k); Q.push([n[0], n[1], first, dist + 1]); }
+    }
+    return null;
+  }
+  function space(x, y, learn, B) { // free cells reachable from (x,y), capped
+    const seen = new Set([x + ',' + y]), Q = [[x, y]];
+    for (let qi = 0; qi < Q.length && seen.size < 50; qi++) for (const d of Object.values(DIRS)) { const n = nbr(Q[qi][0], Q[qi][1], d, learn); if (!n) continue; const k = n[0] + ',' + n[1]; if (seen.has(k) || B.has(k)) continue; seen.add(k); Q.push(n); }
+    return seen.size;
+  }
+  function cpuBrain(dt, skill, i = 1, press = (b) => GS.cpu.press(b)) {
+    const o = i ? 0 : 1, s = S.snakes[i], B = S['cpuB' + i] || (S['cpuB' + i] = { lastStep: -1, qId: null, pick: null, qReady: 0, target: null, retarget: 0, readyAt: 0 });
+    const learn = S.mode === 'learn', u = H.clamp((skill - 0.1) / 0.85), react = H.lerp(1.4, 0.35, u);
+    if (learn && S.zone === 6) { // ready screen: ready a second after Player 1
+      if (i === 1 && S.ready[0] && !S.ready[1]) { if (!B.readyAt) B.readyAt = clk + 1; if (clk >= B.readyAt) press('a'); }
+      return;
+    }
+    if (S.steps === B.lastStep) return; // one decision per step
+    B.lastStep = S.steps;
+    const h = s.body[0], q = S.q;
+    let goal = null, avoid = () => false;
+    if (!learn && q) { // gates: never wander into a gate by accident
+      avoid = (x, y) => q.gates.some((g) => isGateCell(g, x, y) && g !== B.pick);
+      if (!q.resolved && !q.locked[i]) {
+        if (B.qId !== q.t0) { B.qId = q.t0; B.pick = null; B.qReady = q.t0 + react * 1.8; } // read the question first
+        if (!B.pick && clk >= B.qReady) { const right = q.gates.find((g) => g.correct), wrong = q.gates.filter((g) => !g.correct && !g.broken); B.pick = rng() < 0.35 + 0.6 * skill || !wrong.length ? right : wrong[Math.floor(rng() * wrong.length)]; }
+        if (B.pick) goal = (x, y) => isGateCell(B.pick, x, y);
+      } else B.pick = null;
+    }
+    if (!goal && learn && S.pickup && !S.pickup.eaten) goal = (x, y) => x === S.pickup.x && y === S.pickup.y;
+    if (!goal && learn && exitOpen()) goal = (x) => x === COLS - 1;
+    if (!goal) {
+      // nearest monomer; when the one it was chasing vanishes, it takes a moment to notice the next
+      if (B.target && !S.items.includes(B.target)) { B.target = null; B.retarget = clk + react * 0.9; B.wander = rng() < (1 - u) * 0.45; }
+      if (clk >= B.retarget) {
+        // low skill sometimes fixes on a farther monomer instead of the nearest
+        if (B.wander && B.far && !S.items.includes(B.far)) { B.far = null; B.wander = rng() < (1 - u) * 0.45; B.retarget = clk + react * 0.9; }
+        if (B.wander && S.items.length > 1 && clk >= B.retarget) { const far = B.far || (B.far = S.items[Math.floor(rng() * S.items.length)]); goal = (x, y) => x === far.x && y === far.y; }
+        const r = goal ? null : bfs(s, (x, y) => S.items.some((m) => m.x === x && m.y === y), avoid, learn);
+        if (r) { goal = (x, y) => S.items.some((m) => m.x === x && m.y === y); let bd = 1e9; for (const m of S.items) { const dd = Math.abs(m.x - h.x) + Math.abs(m.y - h.y); if (dd < bd) { bd = dd; B.target = m; } } }
+      }
+    }
+    let want = s.dir;
+    if (goal) { const r = bfs(s, goal, avoid, learn); if (r) want = r.dir; }
+    if (learn && exitOpen() && h.x === COLS - 1 && (!S.pickup || S.pickup.eaten)) want = DIRS.right;
+    if (!learn && rng() < (1 - u) * 0.4) want = s.dir; // late turn: keeps going straight one more step
+    // safety: does the move hit a wall or a chain? (better players notice more often)
+    const Bk = blockedSet(learn), bad = (d) => { const n = nbr(h.x, h.y, d, learn); return !n || Bk.has(n[0] + ',' + n[1]) || avoid(n[0], n[1]) && !(goal && goal(n[0], n[1])); };
+    if (!learn && bad(want) && rng() < 0.4 + 0.6 * u) {
+      let best = null, bs = -1;
+      for (const d of Object.values(DIRS)) { if (d[0] === -s.dir[0] && d[1] === -s.dir[1]) continue; if (bad(d)) continue; const n = nbr(h.x, h.y, d, learn), sp = space(n[0], n[1], learn, Bk); if (sp > bs) { bs = sp; best = d; } }
+      if (best) want = best;
+    }
+    if (want[0] !== s.dir[0] || want[1] !== s.dir[1]) press(DNAME[want[0] + ',' + want[1]]);
+  }
+  const cpuActive = () => GS.cpu && GS.cpu.on && GS.running;
+  const pname = (i) => (i === 1 && GS.cpu && GS.cpu.on ? 'CPU' : PCOL[i].name);
+
   function stepSnakes() {
+    S.steps = (S.steps || 0) + 1;
     const learn = S.mode === 'learn';
     const next = S.snakes.map((s) => {
       if (S.mode === 'attract') ai(s);
@@ -322,6 +411,7 @@
     }
     // monomers drift too in the field
     if (Z.monomers && zt > 4) S.items.forEach((m, i) => { if (Math.floor(clk * 2.2 + i) % 7 !== 0 || m.moved === Math.floor(clk * 2.2)) return; m.moved = Math.floor(clk * 2.2); const h = S.snakes[i % 2].body[0]; if (Math.abs(h.x - m.x) + Math.abs(h.y - m.y) > 2) { const nx = rng() < 0.5 ? m.x + Math.sign(h.x - m.x) : m.x, ny = nx === m.x ? m.y + Math.sign(h.y - m.y) : m.y; if (!S.items.some((o) => o !== m && Math.abs(o.x - nx) < 4 && Math.abs(o.y - ny) < 3)) { m.x = nx; m.y = ny; } } });
+    if (cpuActive()) cpuBrain(dt, GS.cpu.skill);
     // ready screen: both press a
     if (S.zone === 6) {
       for (let i = 0; i < 2; i++) if (GS.hit(i + 1, 'a') && !S.ready[i]) { S.ready[i] = true; GS.sfx('select'); }
@@ -389,6 +479,8 @@
       if (q.resolved && clk - q.resolveT > 2.8) { S.q = null; S.nextQ = clk + H.lerp(5, 2.5, p); }
     }
     fillMonomers(3 + Math.floor(p * 4));
+    if (cpuActive()) cpuBrain(dt, GS.cpu.skill);
+    if (window.__CHAIN.botP1 != null) cpuBrain(dt, window.__CHAIN.botP1, 0, (b) => S.snakes[0].queue.push(DIRS[b]));
     stepTick(dt);
   }
 
@@ -430,7 +522,7 @@
     const [dx, dy] = s.dir;
     const e = dx > 0 ? [[5, 2], [5, 5]] : dx < 0 ? [[2, 2], [2, 5]] : dy < 0 ? [[2, 2], [5, 2]] : [[2, 5], [5, 5]];
     e.forEach(([ex, ey]) => { put(hx + ex, hy + ey, P.white); put(hx + ex + (dx > 0 ? 1 : dx < 0 ? -1 : 0), hy + ey + (dy > 0 ? 1 : dy < 0 ? -1 : 0), P.K); });
-    if (s.label > 0 || S.mode === 'learn') textC(PCOL[s.i].name, hx + 4, hy - 10, PCOL[s.i].txt, P.K, 1, P.K);
+    if (s.label > 0 || S.mode === 'learn') textC(pname(s.i), hx + 4, hy - 10, PCOL[s.i].txt, P.K, 1, P.K);
   }
 
   function drawMonomers(labelled) {
@@ -535,7 +627,7 @@
     // quest header + controls (always visible during LEARN)
     win(2, 2, 248, 21);
     text(Z.title, 7, 5, P.gold, P.K);
-    text('P1: W A S D', 7, 14, PCOL[0].txt, P.K); text('P2: ARROW KEYS', 92, 14, PCOL[1].txt, P.K); text('STEER!', 192, 14, P.white, P.K);
+    text('P1: W A S D', 7, 14, PCOL[0].txt, P.K); text(GS.cpu && GS.cpu.on ? 'P2: CPU' : 'P2: ARROW KEYS', 92, 14, PCOL[1].txt, P.K); text('STEER!', 192, 14, P.white, P.K);
     if (S.page >= 0) drawDialog(Z.pages[S.page].l, S.typed);
   }
 
@@ -552,7 +644,7 @@
     textC('BOTH PRESS A TO START', 160, 130, P.white, P.K);
     const r0 = S.ready[0], r1 = S.ready[1], bl = Math.floor(clk * 3) % 2;
     win(40, 144, 110, 22, r0 ? PX.WGREEN : PX.WB); textC(r0 ? 'P1 READY @' : 'P1: PRESS F', 95, 151, r0 ? P.white : PCOL[0].txt, P.K);
-    win(170, 144, 110, 22, r1 ? PX.WGREEN : PX.WB); textC(r1 ? 'P2 READY @' : 'P2: PRESS ENTER', 225, 151, r1 ? P.white : PCOL[1].txt, P.K);
+    win(170, 144, 110, 22, r1 ? PX.WGREEN : PX.WB); textC(r1 ? pname(1) + ' READY @' : (GS.cpu && GS.cpu.on ? 'CPU: WAITING' : 'P2: PRESS ENTER'), 225, 151, r1 ? P.white : PCOL[1].txt, P.K);
   }
 
   function drawArena() {
@@ -571,10 +663,10 @@
         const lines = q.d.q; lines.forEach((l, i) => text(l, 24, lines.length === 1 ? 9 : 5 + i * 9, P.white, P.K));
         const left = Math.ceil(q.dur - (clk - q.t0));
         text(String(left), 236, 9, left <= 3 ? P.red : P.gold, P.K);
-        if (q.wrongAt && clk - q.wrongAt < 1.5) textC(PCOL[q.wrongBy].name + ' LOCKED OUT', 125, 25, P.red, P.K, 1, P.K);
+        if (q.wrongAt && clk - q.wrongAt < 1.5) textC(pname(q.wrongBy) + ' LOCKED OUT', 125, 25, P.red, P.K, 1, P.K);
       } else if (q && q.resolved) {
         win(2, 2, 248, 21, PX.WGREEN);
-        const who = q.resolved.by >= 0 ? PCOL[q.resolved.by].name + ' GOT IT! ' : (q.resolved.timeout ? "TIME! " : '');
+        const who = q.resolved.by >= 0 ? pname(q.resolved.by) + ' GOT IT! ' : (q.resolved.timeout ? "TIME! " : '');
         text(who + 'ANSWER:', 7, 5, P.gold, P.K);
         text(q.d.a + (q.d.why ? '' : ''), 7 + textW(who + 'ANSWER: '), 5, P.white, P.K);
         text(q.d.why, 7, 14, P.white, P.K);
@@ -591,7 +683,7 @@
     // bottom HUD: scores
     const [a, b] = S.snakes;
     PX.sprite(HEAD, PCOL[0], 3, 170); text('P1 ' + String(scoreOf(a)).padStart(3, ' '), 14, 171, PCOL[0].txt, P.K);
-    PX.sprite(HEAD, PCOL[1], 248, 170); text('P2 ' + String(scoreOf(b)).padStart(3, ' '), 259, 171, PCOL[1].txt, P.K);
+    PX.sprite(HEAD, PCOL[1], 248, 170); text((GS.cpu && GS.cpu.on ? 'CPU' : 'P2 ') + String(scoreOf(b)).padStart(3, ' '), 259, 171, PCOL[1].txt, P.K);
     textC('ETHENE +1  GATE +' + (S.final ? 10 : 5) + '  CRASH -3', 160, 171, P.grey, P.K);
   }
 
@@ -638,7 +730,8 @@
     onPhase(p, prev) { if (p === 'play') setupTest(); if (p === 'idle') setupAttract(); if (p === 'learn' && (!S || S.mode !== 'learn')) setupLearn(); },
     onPause() {},
   });
-  window.__CHAIN = { get S() { return S; } }; // debug hook for headless checks
+  window.__CHAIN = { get S() { return S; }, DIRS, botP1: null }; // debug hooks for headless checks
+  window.__CHAIN.runBotP1 = (skill) => { window.__CHAIN.botP1 = skill; }; // debug hook for headless checks
   setupAttract();
   requestAnimationFrame(frame);
 })();

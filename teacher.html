@@ -138,7 +138,7 @@ function draw() {
     const sp = s && s.stPause && s.stPause[st.n];
     const sc = d.scores ? (d.mode === 'coop' ? d.scores[0] + ' pts' : d.scores[0] + ' – ' + d.scores[1]) : '–';
     const flags = sync.local ? '<span class="dim">no live status offline</span>' : !on ? '<span class="bad">● not connected</span>'
-      : [d.fs ? '<span class="good">● full screen</span>' : '<span class="warn">⚠ left full screen</span>', d.vis === 'hidden' ? '<span class="bad">tab hidden</span>' : '', d.phase ? d.phase.toUpperCase() : ''].filter(Boolean).join(' · ');
+      : [d.fs ? '<span class="good">● full screen</span>' : '<span class="warn">⚠ left full screen</span>', d.vis === 'hidden' ? '<span class="bad">tab hidden</span>' : '', d.phase ? d.phase.toUpperCase() : '', d.cpu ? '<span class="warn">P2 = computer</span>' : ''].filter(Boolean).join(' · ');
     return `<div class="card tile ${on === false ? 'off' : ''} ${sp ? 'paused' : ''}"><div class="no">${st.n}</div><h3>${st.name}</h3><div class="leader">${st.topic}</div>
       <div class="sc">${sc}</div><div class="flags">${flags}</div>
       <button class="btn" data-sp="${st.n}" style="margin-top:8px;padding:4px 10px;font-size:13px" ${running ? '' : 'disabled'}>${sp ? '▶ resume station' : '⏸ pause station'}</button></div>`;

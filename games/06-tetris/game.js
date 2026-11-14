@@ -389,7 +389,7 @@
     if (p.grid.slice(0, HID).some((r) => r.some((x) => x))) topOut(p);
   }
   function shake(p, d) { p.shake = Math.max(p.shake, d); p.shakeT0 = gt; }
-  function addFx(p, f) { f.t0 = gt; p.fx.push(f); if (p.fx.length > 16) p.fx.shift(); }
+  function addFx(p, f) { f.t0 = gt; f.dur = f.dur || 1.2; p.fx.push(f); if (p.fx.length > 16) p.fx.shift(); }
   function setCaption(p, tone, lines, dur) { p.caption = { tone, lines, t0: gt, dur }; }
 
   // ---------------- input / update ----------------
@@ -453,17 +453,71 @@
     return ct;
   }
 
+
+  // ---------------- CPU player 2 (docs/CPU.md) ----------------
+  // Placement search (lines, holes, bumpiness, height) with skill-scaled noise, executed as key presses with a
+  // reaction delay and a per-move delay; keep/peel decided after the reaction delay, right with p = 0.35 + 0.6·skill.
+  function mkBrain() { return { plan: null, piece: null, wait: 0, peelAt: -1, decided: false, readyAt: -1 }; }
+  const brains = [mkBrain(), mkBrain()];
+  function brainControls(p, dt, skill) {
+    const b = brains[p.i];
+    const ct = { left: false, right: false, lHit: false, rHit: false, rot: false, soft: false, hard: false, peel: false };
+    if (mode === 'learn') {
+      const o = opp(p);
+      if (o.ready && !p.ready) { if (b.readyAt < 0) b.readyAt = gt + 1; else if (gt >= b.readyAt) { p.ready = true; GS.sfx('ding', { f: 'E5', gain: 0.5 }); } }
+    }
+    const pc = p.piece; if (!pc || p.clearing) { b.piece = null; return ct; }
+    if (b.piece !== pc) {
+      // new piece: think, then plan (noisier evaluation at low skill = worse placements)
+      b.piece = pc; b.plan = null; b.decided = false; b.peelAt = -1;
+      b.wait = H.lerp(1.4, 0.35, skill) * (0.75 + Math.random() * 0.5);
+    }
+    if (b.wait > 0) { b.wait -= dt; return ct; }
+    if (!b.plan) {
+      const noise = (1 - skill) * 2.6;
+      let best = null;
+      for (let rot = 0; rot < 4; rot++) for (let x = -2; x < COLS; x++) {
+        if (!fits(p, pc.k, rot, x, pc.y)) continue;
+        let y = pc.y; while (fits(p, pc.k, rot, x, y + 1)) y++;
+        const g = p.grid.map((r) => r.slice()); BLOCKS[pc.k][rot].forEach(([bx, by]) => { if (y + by >= 0) g[y + by][x + bx] = 1; });
+        const sc = evalGrid(g) + Math.random() * noise;
+        if (!best || sc > best.s) best = { s: sc, rot, x };
+      }
+      b.plan = best || { rot: pc.rot, x: pc.x };
+    }
+    // sticker: keep or peel (only in the test does it matter; in LEARN it keeps everything)
+    if (!b.decided && pc.sticker >= 0) {
+      b.decided = true;
+      if (mode === 'play') {
+        const right = Math.random() < 0.35 + 0.6 * skill;
+        const shouldPeel = pc.sticker !== ORD[p.order].a;
+        if (right ? shouldPeel : !shouldPeel) b.peelAt = gt + H.lerp(0.9, 0.25, skill) * Math.random();
+      }
+    }
+    if (b.peelAt >= 0 && gt >= b.peelAt && pc.sticker >= 0) { ct.peel = true; b.peelAt = -1; return ct; }
+    if (b.peelAt >= 0) return ct; // still "thinking" about the sticker
+    b.wait = H.lerp(0.24, 0.05, skill) * (0.7 + Math.random() * 0.6); // per-move delay
+    const pl = b.plan;
+    if (pc.rot !== pl.rot) ct.rot = true;
+    else if (pc.x > pl.x) { if (!fits(p, pc.k, pc.rot, pc.x - 1, pc.y)) pl.x = pc.x; else ct.lHit = true; }
+    else if (pc.x < pl.x) { if (!fits(p, pc.k, pc.rot, pc.x + 1, pc.y)) pl.x = pc.x; else ct.rHit = true; }
+    else if (Math.random() < skill) ct.hard = true;
+    else { ct.soft = true; b.wait = 0; }
+    return ct;
+  }
+
   // ---------------- drawing ----------------
   function drawCell(kind, x, y) { c.drawImage(cellCol[kind], x - 4, y - 4); k.drawImage(cellKey[kind], x - 4, y - 4); }
   function drawBadge(s, x, y, sc = 1) {
     if (sc === 1) { c.drawImage(badgeCol[s], x - 20, y - 20); k.drawImage(badgeKey[s], x - 20, y - 20); }
     else { c.drawImage(badgeCol[s], x - 20 * sc, y - 20 * sc, 40 * sc, 40 * sc); k.drawImage(badgeKey[s], x - 20 * sc, y - 20 * sc, 40 * sc, 40 * sc); }
   }
+  const cpuNow = () => !!(GS.cpu && GS.cpu.on && mode !== 'idle');
   function drawPlayer(p) {
     const wx = wellX(p), cx0 = colX(p), wy = WELL_Y;
     const sh = p.shake > 0 ? p.shake : 0, sx = sh ? Math.sin(gt * 90) * 7 * Math.min(1, sh * 3) : 0, sy = sh ? Math.cos(gt * 73) * 4 * Math.min(1, sh * 3) : 0;
     // header
-    box(wx - 4, 76, 182, 42, p.i ? C.white : C.yellow, 'PLAYER ' + (p.i + 1), 30);
+    box(wx - 4, 76, 182, 42, p.i ? (cpuNow() ? C.blue : C.white) : C.yellow, p.i && cpuNow() ? 'P2 = CPU' : 'PLAYER ' + (p.i + 1), 30, p.i && cpuNow() ? '#fff' : C.black);
     if (mode === 'play') box(wx + 186, 76, 98, 42, C.white, 'SPEED ' + speedLevel(), 24);
     else if (mode === 'learn') box(wx + 186, 76, 98, 42, C.blue, 'LEARN', 26, '#fff');
     for (const x of [c, k]) { x.save(); x.translate(sx, sy); x.beginPath(); x.rect(wx - 2, wy, COLS * CS + 4, (ROWS - HID) * CS + 2); x.clip(); }
@@ -515,7 +569,7 @@
     for (const x of [c, k]) x.restore();
     // learn tips inside the well
     if (mode === 'learn') drawLearnTip(p, wx, wy);
-    if (mode === 'learn' && p.ready) { box(wx + 10, wy + 210, 260, 50, C.yellow, p.i ? 'READY! WAITING FOR P1…' : 'READY! WAITING FOR P2…', 26); }
+    if (mode === 'learn' && p.ready) { box(wx + 10, wy + 210, 260, 50, C.yellow, p.i ? 'READY! WAITING FOR P1…' : cpuNow() ? 'READY! CPU JOINS IN 1 S' : 'READY! WAITING FOR P2…', 26); }
     // effects over the well
     for (const f of p.fx) {
       const u = (gt - f.t0) / f.dur; if (u < 0 || u > 1) continue;
@@ -642,6 +696,7 @@
       box(X, Y, w, h, C.white, '', 0);
       c.fillStyle = C.yellow; c.fillRect(X, Y, w, 34); k.lineWidth = 4; k.strokeRect(X, Y, w, 34);
       say('CONTROLS', 24, X + w / 2, Y + 18);
+      if (p.i && cpuNow()) { block('COMPUTER IS PLAYING. PRESS ANY P2 KEY TO TAKE OVER', 24, X + w / 2, Y + 118, w - 16, 5); return; }
       const rows = p.i ? [['← →', 'MOVE'], ['↑', 'TURN'], ['↓', 'DOWN'], ['ENTER', 'DROP'], ['R-SHIFT', 'PEEL']] : [['A D', 'MOVE'], ['W', 'TURN'], ['S', 'DOWN'], ['F', 'DROP'], ['G', 'PEEL']];
       rows.forEach(([a, b], i) => { const yy = Y + 56 + i * 33; say(a, fitSize(a, 24, 72), X + 10, yy, 1, 'left', 0, C.red); say(b, 24, X + w - 10, yy, 1, 'right'); });
     }
@@ -681,7 +736,8 @@
   // ---------------- lifecycle ----------------
   function startMode(m) {
     mode = m; gfx.length = 0; learnT = 0;
-    players.forEach((p) => resetPlayer(p, m));
+    players.forEach((p) => resetPlayer(p, m)); brains.forEach((b, i) => (brains[i] = mkBrain()));
+    if (GS.cpu) GS.cpu.releaseAll();
     if (m === 'play') { playStartT = GS.t; }
     pushScore();
   }
@@ -714,7 +770,8 @@
     } else if (GS.running) {
       gt += dt;
       if (mode === 'learn') learnT += dt;
-      const cts = players.map(controls);
+      const cpuOn = GS.cpu && GS.cpu.on;
+      const cts = players.map((p) => (p.i === 1 && cpuOn) ? brainControls(p, dt, GS.cpu.skill) : (p.i === 0 && window.__t06.p1bot) ? brainControls(p, dt, window.__t06.p1bot) : controls(p));
       players.forEach((p, i) => update(p, dt, cts[i]));
       if (mode === 'learn' && players[0].ready && players[1].ready) GS.skipLearn();
     }

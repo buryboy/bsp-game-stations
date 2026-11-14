@@ -15,6 +15,8 @@ Seven 2-player browser games for a station-rotation lesson. Each one teaches its
 | 6 | POW! Polymer Blocks | Stock forms, additives, finishes | Pop-art comic | 1 v 1 |
 | 7 | Recycle Run | Sustainability & recycling | Synthwave | co-op |
 
+**Playing alone?** If nobody touches the Player 2 keys for 15 s, the computer takes over Player 2 (a "P2 = CPU" badge shows). In 1 v 1 games it adjusts its difficulty to keep the score close; in the co-op games it is a sidekick that never makes the key decisions. Any Player 2 key hands control back. Add `?cpu=0` to a game's path in `lib/stations.js` to switch this off.
+
 Controls everywhere: **P1 = W A S D + F (+ G)**, **P2 = arrow keys + Enter (+ Right Shift)**.
 
 ## Before the lesson

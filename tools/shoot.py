@@ -13,6 +13,7 @@ from playwright.sync_api import sync_playwright
 ap = argparse.ArgumentParser()
 ap.add_argument('game'); ap.add_argument('out')
 ap.add_argument('--keys', default='KeyW,KeyA,KeyS,KeyD,KeyF,ArrowUp,ArrowDown,ArrowLeft,ArrowRight,Enter')
+ap.add_argument('--q', default='', help='extra query string, e.g. cpu=1')
 ap.add_argument('--mash', type=float, default=12, help='seconds of random key presses in the play phase')
 a = ap.parse_args()
 root = pathlib.Path(__file__).resolve().parent.parent
@@ -22,7 +23,7 @@ class Q(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *x): pass
 srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(Q, directory=str(root)))
 threading.Thread(target=srv.serve_forever, daemon=True).start()
-url = f'http://127.0.0.1:{srv.server_port}/{a.game}?mute=1'
+url = f'http://127.0.0.1:{srv.server_port}/{a.game}?mute=1' + ('&' + a.q if a.q else '')
 
 errs = []
 with sync_playwright() as p:

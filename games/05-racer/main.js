@@ -267,7 +267,8 @@ function gridCars() {
   });
 }
 function resetRound() {
-  for (const p of P) Object.assign(p, { score: 0, ticket: null, failed: false, streak: 0, boost: 0, visited: new Set(), practice: null, ready: false, startPressed: false, msg: null, cardPop: -9, lastGate: {}, flashM: null, flashUntil: 0 });
+  for (const b of BOT) Object.assign(b, { steerAt: 0, decideAt: 0, px: null, spunAt: -9, misses: 0, ticket: null, target: null, failed: false, stuck: 0, reverseT: 0, readyAt: -1, boostCD: 2 });
+  for (const p of P) Object.assign(p, { misses: 0, score: 0, ticket: null, failed: false, streak: 0, boost: 0, visited: new Set(), practice: null, ready: false, startPressed: false, msg: null, cardPop: -9, lastGate: {}, flashM: null, flashUntil: 0 });
   introBanner = false; CARS.forEach((c) => (c.learnM = null)); gridCars(); roundT = 0; introT = 0; playT = -1; popups = []; banners = []; bothReadyAt = -1;
   for (const m of MACHINES) { m.learnUntil = -1; m.learnAt = -99; m.flash = 0; m.deliverAt = -99; }
   SPILLS.length = 0; FORKS.forEach((fk) => (fk.g.visible = false));
@@ -376,6 +377,69 @@ function autopilot(c, p, mode) {
   return { up: true, down: false, left: da < -0.06, right: da > 0.06 };
 }
 
+
+// ================= CPU player (also used as a scripted P1 in headless tests) =================
+// Reads only what a player can see (its own ticket card + the road ahead). Skill sets reaction time, steering
+// error, cruising speed, boost use and how often it picks the right machine (p = 0.35 + 0.6·skill).
+const BOT = [0, 1].map(() => ({ ticket: null, target: null, decideAt: 0, failed: false, stuck: 0, reverseT: 0, wob: Math.random() * 6, steer: 0, steerAt: 0, readyAt: -1, boostCD: 2 }));
+function botInput(i, dt, skill) {
+  const p = P[i], c = p.car, b = BOT[i], ph = GS.phase, learn = ph === 'learn';
+  const react = lerp(1.4, 0.35, (skill - 0.1) / 0.85);
+  // --- choose a machine for the current ticket (after a human-like reading delay) ---
+  if (ph === 'play' && p.ticket) {
+    if (b.ticket !== p.ticket || b.misses !== p.misses) {
+      const relearn = b.ticket === p.ticket; // just shown the answer: usually takes it in
+      b.ticket = p.ticket; b.misses = p.misses; b.target = null; b.decideAt = roundT + react * (0.8 + Math.random() * 0.6);
+      b.pRight = relearn ? 0.8 + 0.2 * skill : 0.35 + 0.6 * skill;
+    }
+    if (!b.target && roundT >= b.decideAt) {
+      if (Math.random() < b.pRight) b.target = p.ticket.m;
+      else { const wrong = MACHINES.filter((m) => m.id !== p.ticket.m); b.target = wrong[Math.floor(Math.random() * wrong.length)].id; }
+    }
+  } else b.target = null;
+  const want = (m) => (learn ? (p.practice ? p.practice.m === m.id : !p.ready) : m.id === b.target);
+  // --- lane choice from the road ahead ---
+  const sp_ = Math.hypot(c.vx, c.vz);
+  const look = TRK[(c.idx + 11 + Math.round(sp_ * 0.5)) % NT];
+  let lat = 0;
+  // the next machine on the road (or the one being passed): get into its gate lane or the bypass well before it
+  let next = null, nd = 1e9;
+  for (const m of MACHINES) { const d = sDiff(m.s, c.s); if (d > 0.4 && d < 9 + sp_ * 0.9 && d < nd) { nd = d; next = m; } }
+  if (next) lat = want(next) ? next.side * 1.8 : -next.side * 1.6;
+  if (!lat) lat = (i ? -1 : 1) * 0.8;
+  lat += Math.sin(roundT * 0.9 + b.wob) * (1 - skill) * 0.7;   // wobbly line at low skill
+  const tx = look.x - look.tz * lat, tz = look.z + look.tx * lat;
+  let da = Math.atan2(tz - c.z, tx - c.x) - c.a; da = Math.atan2(Math.sin(da), Math.cos(da));
+  // steering decisions refresh at a human rate, not every frame
+  if (roundT >= b.steerAt || b.steerAt - roundT > 1) { b.steer = Math.abs(da) < 0.05 + (1 - skill) * 0.08 ? 0 : Math.sign(da); b.steerAt = roundT + lerp(0.22, 0.05, skill); }
+  // --- speed: cruise at 0.78–1.0 of top speed ---
+  const top = learn ? 7 : [0, 11, 12.5, 13.5][LEVEL()];
+  const sp = Math.hypot(c.vx, c.vz), cruise = top * lerp(0.78, 1.0, (skill - 0.1) / 0.85) * (Math.abs(da) > 0.6 ? 0.7 : 1);
+  const inp = { up: sp < cruise, down: false, left: b.steer < 0, right: b.steer > 0, a: false };
+  // --- recover when stuck against something ---
+  // stuck = trying to drive but hardly moved for 1.2 s (never right after a spin-out)
+  if (c.spin > 0) b.spunAt = roundT;
+  if (b.px == null || roundT - b.pAt > 1.2 || roundT < b.pAt) { const moved = b.px == null ? 9 : Math.hypot(c.x - b.px, c.z - b.pz); b.px = c.x; b.pz = c.z; b.pAt = roundT;
+    if (moved < 0.8 && roundT - (b.spunAt || -9) > 1.5 && (!learn || introT > 6.5) && b.reverseT <= 0) b.reverseT = 0.7; }
+  if (b.reverseT > 0) { b.reverseT -= dt; inp.up = false; inp.down = true; inp.left = da > 0; inp.right = da < 0; }
+  // --- boost on clear straights now and then ---
+  b.boostCD -= dt;
+  if (ph === 'play' && p.boost > 0 && b.boostCD <= 0 && c.spin <= 0 && !look.arc && Math.abs(da) < 0.15) {
+    const gateAhead = MACHINES.some((m) => m.id === b.target && sDiff(m.s, c.s) > 0 && sDiff(m.s, c.s) < 10);
+    if (!gateAhead && Math.random() < dt * lerp(0.15, 0.6, skill)) { inp.a = true; b.boostCD = 4; }
+  }
+  // --- LEARN: ready shortly after the other player ---
+  if (learn && p.ready && P[1 - i].ready && !p.startPressed) { if (b.readyAt < 0) b.readyAt = roundT + 1; if (roundT >= b.readyAt && (P[1 - i].startPressed || i === 0)) inp.a = true; }
+  return inp;
+}
+function cpuBrain(dt, skill) {
+  const inp = botInput(1, dt, skill);
+  for (const k of ['up', 'down', 'left', 'right']) GS.cpu.hold(k, inp[k]);
+  if (inp.a) GS.cpu.press('a');
+}
+let cpuWasOn = false;
+const cpuOn = () => !!(GS.cpu && GS.cpu.on);
+
 // ================= gate logic =================
 function checkGates(p, phase) {
   const c = p.car;
@@ -385,6 +449,7 @@ function checkGates(p, phase) {
     if (Math.abs(d0) > 5 || Math.abs(d1) > 5 || !((d0 < 0 && d1 >= 0) || (d0 > 0 && d1 <= 0))) continue;
     if (Math.abs(c.lat) > RH + 2) continue;
     const inGate = c.lat * m.side > 0.2;
+    if (window.__racer && window.__racer.log) window.__racer.log.push([p.i, m.id, c.lat.toFixed(1), inGate, phase, p.ticket && p.ticket.m, BOT[p.i].target]);
     if (phase === 'learn') {
       if (!p.visited.has(m.id)) { p.visited.add(m.id); sfx('ding', { f: p.visited.size === 9 ? 'C6' : 'G5', gain: 0.4, pan: pan(m.x, m.z) }); }
       if (inGate) { m.flash = 1; m.flashCol = PAL.mint; }
@@ -405,7 +470,9 @@ function givePractice(p) {
   const prod = PRODUCTS.find((q) => q.m === m.id && q.lv === 1);
   p.practice = { ...prod }; p.cardPop = roundT; sfx('pop', { gain: 0.7 });
 }
+const STATS = { right: [0, 0], wrong: [0, 0] };
 function deliver(p, m) {
+  STATS.right[p.i]++;
   const lv = LEVEL(), base = p.failed ? 5 : lv === 3 ? 15 : 10;
   const bonus = Math.min(8, p.streak * 2), dbl = GS.timeLeft() < 30 ? 2 : 1;
   const pts = (base + (p.failed ? 0 : bonus)) * dbl;
@@ -421,6 +488,7 @@ function deliver(p, m) {
   GS.score(P[0].score, P[1].score);
 }
 function wrongGate(p, m) {
+  STATS.wrong[p.i]++; p.misses = (p.misses || 0) + 1;
   const right = MBY[p.ticket.m], c = p.car;
   p.score = Math.max(0, p.score - 5); p.streak = 0; p.failed = true;
   c.spin = 1.25; c.spinRate = 13;
@@ -466,17 +534,20 @@ function update(dt) {
   const phase = GS.phase, running = GS.running, idle = phase === 'idle';
   if (phase !== lastPhase) {
     if (phase === 'play' && lastPhase === 'learn') startTest();
-    if (phase === 'play' && playT < 0) startTest();
     lastPhase = phase;
   }
+  if (phase === 'play' && playT < 0) startTest();
   if (!running && !idle) return; // paused / over: freeze
   wt += dt;
   if (running) { roundT += dt; introT = phase === 'learn' ? Math.max(introT, GS.t) : 99; if (playT >= 0) playT += dt; }
   const learn = phase === 'learn', play = phase === 'play';
+  if (cpuOn() && running) { cpuBrain(dt, GS.cpu.skill); cpuWasOn = true; } else if (cpuWasOn) { cpuWasOn = false; GS.cpu && GS.cpu.releaseAll(); BOT[1].readyAt = -1; }
   const canDrive = idle || (learn ? introT > 5.6 : true);
   CARS.forEach((c, i) => {
     const p = P[i];
     let inp = idle ? { up: false } : inputFor(i);
+    const p1bot = i === 0 && window.__racer && window.__racer.p1bot != null && running;
+    if (p1bot) { inp = botInput(0, dt, window.__racer.p1bot); if (inp.a) { if (play && p.boost > 0 && c.boostT <= 0 && c.spin <= 0) { p.boost--; c.boostT = 1.3; } if (learn && p.ready) p.startPressed = true; } }
     const any = inp.up || inp.down || inp.left || inp.right;
     c.idleT = any ? 0 : c.idleT + dt;
     if (idle) inp = autopilot(c, p, 'attract');
@@ -617,7 +688,7 @@ function drawHUD() {
     const [sx, sy] = scr(c.x, 1.6, c.z), col = i ? PAL.blue : PAL.coral;
     const x = clamp(sx, 30, W - 30), y = clamp(sy - 26, 20, H - 30);
     ctx.save(); ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(x - 8, y + 14); ctx.lineTo(x + 8, y + 14); ctx.lineTo(x, y + 24); ctx.fill(); ctx.restore();
-    tag(ctx, x, y, 'P' + (i + 1), { font: f(800, 24), bg: col, col: '#fff' });
+    tag(ctx, x, y, i && cpuOn() ? 'CPU' : 'P' + (i + 1), { font: f(800, 24), bg: col, col: '#fff' });
     if (roundT - P[i].hornT < 0.6) tag(ctx, x + 56, y - 22, 'BEEP!', { font: f(800, 24), k: ease.back((roundT - P[i].hornT) / 0.2) });
   });
   // ---- header ----
@@ -693,12 +764,13 @@ function drawCard(p) {
   pill(ctx, x0, y0, cw, chh, 20, '#ffffff');
   ctx.save();
   ctx.fillStyle = col; ctx.beginPath(); ctx.roundRect(x0 + 16, y0 + 14, 62, 36, 18); ctx.fill();
-  ctx.fillStyle = '#fff'; ctx.font = f(800, 24); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('P' + (p.i + 1), x0 + 47, y0 + 33);
+  ctx.fillStyle = '#fff'; ctx.font = f(800, 24); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(p.i && cpuOn() ? 'CPU' : 'P' + (p.i + 1), x0 + 47, y0 + 33);
   ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
-  const ctrl = p.i ? 'Arrows drive · Enter boost' : 'W A S D drive · F boost';
+  const ctrl = p.i ? (cpuOn() ? 'Computer player' : 'Arrows drive · Enter boost') : 'W A S D drive · F boost';
   if (ph === 'play' || ph === 'over') {
-    ctx.fillStyle = PAL.sub; ctx.font = f(700, 24); ctx.fillText(`boost (${p.i ? 'Enter' : 'F'})`, x0 + 90, y0 + 42);
-    const bw_ = ctx.measureText(`boost (${p.i ? 'Enter' : 'F'})`).width;
+    const bl = p.i && cpuOn() ? 'boost' : `boost (${p.i ? 'Enter' : 'F'})`;
+    ctx.fillStyle = PAL.sub; ctx.font = f(700, 24); ctx.fillText(bl, x0 + 90, y0 + 42);
+    const bw_ = ctx.measureText(bl).width;
     for (let j = 0; j < 3; j++) { ctx.fillStyle = j < p.boost ? col : PAL.lav; ctx.beginPath(); ctx.roundRect(x0 + 100 + bw_ + j * 26, y0 + 23, 20, 20, 6); ctx.fill(); }
     ctx.fillStyle = PAL.ink; ctx.font = f(800, 44); ctx.textAlign = 'right'; ctx.fillText(String(p.score), x0 + cw - 58, y0 + 50);
     ctx.fillStyle = PAL.sub; ctx.font = f(700, 24); ctx.fillText('pts', x0 + cw - 18, y0 + 48); ctx.textAlign = 'left';
@@ -721,7 +793,7 @@ function drawCard(p) {
     ctx.fillStyle = PAL.ink; ctx.font = f(700, 24); ctx.fillText(ctrl, x0 + 92, y0 + 41);
     if (p.ready) {
       ctx.fillStyle = PAL.mint; ctx.font = f(800, 28); ctx.fillText('✓ Ready for the test', x0 + 20, y0 + 100);
-      ctx.fillStyle = PAL.ink; ctx.font = f(600, 24); ctx.fillText(`Press ${p.i ? 'Enter' : 'F'} to start`, x0 + 20, y0 + 136);
+      ctx.fillStyle = PAL.ink; ctx.font = f(600, 24); ctx.fillText(p.i && cpuOn() ? 'The computer is ready' : `Press ${p.i ? 'Enter' : 'F'} to start`, x0 + 20, y0 + 136);
     } else if (p.practice) {
       ctx.save(); ctx.translate(x0 + 20, y0 + 64); ctx.scale(k, k);
       ctx.fillStyle = PAL.peach; ctx.beginPath(); ctx.roundRect(0, 0, cw - 40, 88, 12); ctx.fill();
@@ -770,4 +842,4 @@ function frame(now) {
 placeCamera(); placeSun();
 requestAnimationFrame(frame);
 // test hook: run the simulation quickly (no rendering) — used only by headless checks
-window.__racer = { P, CARS, MACHINES, cam, sim(sec, keys) { for (let t = 0; t < sec; t += 1 / 30) { update(1 / 30); animate(1 / 30, false); } updateCamera(5); }, deliver: (i) => deliver(P[i], MBY[P[i].ticket.m]), tp(i, sv, lat) { const c = CARS[i], q = at(sv); c.x = q.x - q.tz * lat; c.z = q.z + q.tx * lat; c.a = Math.atan2(q.tz, q.tx); c.vx = c.vz = 0; c.idx = nearest(c.x, c.z, -1); c.s = c.prevS = TRK[c.idx].s; }, MBY, wrong: (i) => wrongGate(P[i], MACHINES.find((m) => m.id !== P[i].ticket.m)) };
+window.__racer = { P, CARS, MACHINES, cam, sim(sec, keys) { for (let t = 0; t < sec; t += 1 / 30) { update(1 / 30); animate(1 / 30, false); GS.endFrame(); } updateCamera(5); }, stats: () => ({ wrong: STATS.wrong.slice(), right: STATS.right.slice() }), deliver: (i) => deliver(P[i], MBY[P[i].ticket.m]), tp(i, sv, lat) { const c = CARS[i], q = at(sv); c.x = q.x - q.tz * lat; c.z = q.z + q.tx * lat; c.a = Math.atan2(q.tz, q.tx); c.vx = c.vz = 0; c.idx = nearest(c.x, c.z, -1); c.s = c.prevS = TRK[c.idx].s; }, MBY, wrong: (i) => wrongGate(P[i], MACHINES.find((m) => m.id !== P[i].ticket.m)) };

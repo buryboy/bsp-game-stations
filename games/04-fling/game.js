@@ -186,7 +186,7 @@
   function resetAll(mode) {
     Object.assign(S, {
       mode, clock: 0, scores: [0, 0], scoreT: [-9, -9], bodies: [], splats: [], parts: [], floats: [], proj: null, product: null,
-      turn: null, banner: null, mark: null, wobble: 0, learnStep: -1, stepT: 0, ready: [false, false], readyT: 0,
+      turn: null, banner: null, mark: null, wobble: 0, learnStep: -1, stepT: 0, ready: [false, false], readyT: 0, readyAt: { 1: 0, 2: 0 },
       playT0: GS.t, nextP: 1, bag: [], lastK: null, poseK: -1, tier: 0, turnNo: 0, notice: null, lastAmmo: [0, 2, 2], selT: -9, thudT: 0, sweep: null, rng: H.rng(1234 + Math.floor(Math.random() * 1e6)),
     });
     GS.score(0, 0);
@@ -367,7 +367,38 @@
     if (t.tickAcc > 0.25) { t.tickAcc = 0; sfx('tick', { gain: 0.3, f: 3000 + t.power * 2000 }); }
     if (GS.hit(p, 'a') && t.t >= t.lock) fire(t);
   }
+  // ---------------- CPU player 2 (docs/CPU.md) ----------------
+  // Presses P2's virtual buttons like a person would: "thinks" 1.5-3 s, picks the right clay with p = 0.35 + 0.6*skill
+  // (cycling with b, one press at a time), aims by solving the arc it can see then adding noise ~ (1 - skill), steers
+  // the aim with held up/down/left/right at the normal rate, and fires. It never touches Player 1's turn.
+  const cpuOn = () => GS.cpu && GS.cpu.on;
+  const P2NAME = () => (cpuOn() ? 'CPU' : 'P2');
+  let B = null;
+  function cpuBrain(dt, skill) {
+    const t = S.turn, cpu = GS.cpu, r = S.rng;
+    // LEARN ready screen: ready a second after Player 1
+    if (S.mode === 'learn' && S.learnStep >= 5) {
+      if (S.ready[0] && !S.ready[1] && S.clock - S.readyAt[1] > 1) cpu.press('a');
+      return;
+    }
+    if (!t || t.player !== 2 || t.state !== 'aim' || t.demo) { if (B) { cpu.releaseAll(); B = null; } return; }
+    if (!B || B.turn !== t) {
+      const right = t.practice || r() < 0.35 + 0.6 * skill;
+      const wrong = [0, 1, 2, 3, 4].filter((i) => i !== t.order.p);
+      const goal = { angle: 0, power: 0 }; solveAim(goal);
+      const n = 1 - skill, g = () => (r() + r() + r() - 1.5) * 1.3; // roughly gaussian, sd ~0.5
+      B = { turn: t, wait: H.lerp(3.0, 1.5, skill) + r() * 0.4, ammo: right ? t.order.p : wrong[Math.floor(r() * 4)],
+        angle: H.clamp(goal.angle + g() * 0.16 * n, 0.09, 1.38), power: H.clamp(goal.power + g() * 0.14 * n, 0, 1), next: 0, settle: 0 };
+    }
+    B.wait -= dt; B.next -= dt;
+    if (B.wait > 0) return;
+    if (!t.practice && t.ammo !== B.ammo) { if (B.next <= 0) { cpu.press('b'); B.next = H.lerp(0.55, 0.25, skill); } return; }
+    const da = B.angle - t.angle, dp = B.power - t.power;
+    cpu.hold('up', da > 0.02); cpu.hold('down', da < -0.02); cpu.hold('right', dp > 0.02); cpu.hold('left', dp < -0.02);
+    if (Math.abs(da) <= 0.02 && Math.abs(dp) <= 0.02) { B.settle += dt; if (B.settle > H.lerp(0.6, 0.25, skill) && t.t >= t.lock) { cpu.releaseAll(); cpu.press('a'); } }
+  }
   function update(dt) {
+    if (cpuOn() && GS.running) cpuBrain(dt, GS.cpu.skill);
     S.wobble = Math.max(0, S.wobble - dt);
     if (S.mode === 'learn') {
       S.stepT += dt;
@@ -377,7 +408,7 @@
       if (S.learnStep === -1 && S.stepT > 6 && due < 0) { S.learnStep = 0; newLearnTurn(0); }
       else if (due > S.learnStep) { S.learnStep = due; S.proj = null; S.splats = []; if (due < 5) newLearnTurn(due); else { S.turn = null; S.bodies = []; S.product = null; S.readyT = S.clock; S.banner = null; } }
       if (S.learnStep >= 5) {
-        [1, 2].forEach((p) => { if (GS.hit(p, 'a') && !S.ready[p - 1] && S.clock - S.readyT > 0.6) { S.ready[p - 1] = true; (S.readyAt = S.readyAt || {})[p] = S.clock; sfx('pop', { f: 220, gain: 0.6 }); } });
+        [1, 2].forEach((p) => { if (GS.hit(p, 'a') && !S.ready[p - 1] && S.clock - S.readyT > 0.6) { S.ready[p - 1] = true; S.readyAt[p] = S.clock; sfx('pop', { f: 220, gain: 0.6 }); } });
         if (S.ready[0] && S.ready[1]) { S.ready = [false, false]; GS.skipLearn(); return; }
       }
     }
@@ -534,7 +565,7 @@
       const x = 18 + i * 232, y = 12, act = S.mode === 'test' && S.turn && S.turn.player === p;
       const pl = plaque();
       CL.place(ctx, pl, x, y, { sx: act ? 1.06 : 1, sy: act ? 1.06 : 1, ax: 107, ay: 32, alpha: S.mode === 'test' && !act ? 0.8 : 1, shadow: { blur: 14, dx: 7, dy: 8, a: 0.4 } });
-      lineAt('P' + p, 36, PCOL[p], x + 18, y + 46);
+      lineAt(p === 2 ? P2NAME() : 'P1', 36, PCOL[p], x + 18, y + 46);
       const e = S.clock - S.scoreT[i];
       CL.text(ctx, String(S.scores[i]), x + 196, y + 49, 44, INK, { align: 'right', pop: e < 1 ? e : null, step: 1 / 24 });
       if (act) { const u = CL.coil('ul' + p, [[x + 20, y + 76], [x + 194, y + 76]], PCOL[p], 10); CL.place(ctx, u, u.ox, u.oy, { shadow: { blur: 4, dx: 3, dy: 4, a: 0.4 } }); }
@@ -556,7 +587,7 @@
   };
   function drawControls(both) {
     if (both) { lineAt(CTRL[1].learn, 26, TBL, 1250, 681, 'right'); lineAt(CTRL[2].learn, 26, TBL, 1250, 710, 'right'); }
-    else if (S.turn) lineAt(CTRL[S.turn.player].short, 26, TBL, 1250, 704, 'right');
+    else if (S.turn) lineAt(S.turn.player === 2 && cpuOn() ? 'CPU is playing P2: press any P2 key to join' : CTRL[S.turn.player].short, 26, TBL, 1250, 704, 'right');
   }
   function drawTimer(t) {
     const n = Math.ceil(t.timer);
@@ -592,7 +623,7 @@
         const a = S.clock - S.readyT;
         const c = CL.card('ready', [{ t: 'Practice done!', px: 44, col: INK }, { t: 'Ready for the TEST?', px: 36, col: RUST }, { t: 'Both players press fire (F / Enter)', px: 30, col: INK }]);
         cardAt(c, 640 - c.w / 2, 170, { pop: a });
-        [1, 2].forEach((p) => { const r = S.ready[p - 1], c2 = tagCard('rd' + p + r, r ? 'P' + p + ' READY!' : 'P' + p + ': press ' + (p === 1 ? 'F' : 'Enter'), 36, r ? PINK[p] : INK, { col: r ? '#f2c14e' : '#fff7e6' }); cardAt(c2, 640 + (p === 1 ? -180 : 180) - c2.w / 2, 380, { pop: r ? S.clock - (S.readyAt?.[p] ?? 0) : null }); });
+        [1, 2].forEach((p) => { const r = S.ready[p - 1], nm = p === 2 ? P2NAME() : 'P1', c2 = tagCard('rd' + nm + r, r ? nm + ' READY!' : nm + (nm === 'CPU' ? ': waiting for P1' : ': press ' + (p === 1 ? 'F' : 'Enter')), 36, r ? PINK[p] : INK, { col: r ? '#f2c14e' : '#fff7e6' }); cardAt(c2, 640 + (p === 1 ? -180 : 180) - c2.w / 2, 380, { pop: r ? S.clock - (S.readyAt?.[p] ?? 0) : null }); });
         return;
       }
       const k = S.learnStep, P = POLY[k];
@@ -605,7 +636,7 @@
           cardAt(tag, H.clamp(pr.x - tag.w / 2, 700, W - tag.w - 10), pr.y - pr.h / 2 - tag.h - 24, { pop: S.clock - pr.popT - 0.3 });
         }
         if ((t.state === 'aim' || t.state === 'build') && !t.auto) {
-          const pc = CL.card('prac' + t.player, [{ t: 'PLAYER ' + t.player + ': PRACTICE SHOT', px: 32, col: PINK[t.player] }, { t: t.player === 1 ? 'Aim with W/S + A/D, fire with F' : 'Aim with arrows, fire with Enter', px: 28, col: INK }], { padX: 18, padY: 10, col: '#fff7e6', seed: 9 });
+          const cpuT = t.player === 2 && cpuOn(), pc = CL.card('prac' + t.player + cpuT, [{ t: (cpuT ? 'CPU' : 'PLAYER ' + t.player) + ': PRACTICE SHOT', px: 32, col: PINK[t.player] }, { t: cpuT ? 'Watch the computer aim' : t.player === 1 ? 'Aim with W/S + A/D, fire with F' : 'Aim with arrows, fire with Enter', px: 28, col: INK }], { padX: 18, padY: 10, col: '#fff7e6', seed: 9 });
           cardAt(pc, 1000 - pc.w / 2, 80, { pop: S.stepT - 0.6 });
         }
         if (t.auto && t.state === 'flight') { const d = tagCard('demo', 'Demo shot: watch!', 30, INK); cardAt(d, 1000 - d.w / 2, 80); }
@@ -613,7 +644,7 @@
     } else if (S.mode === 'test' && t) {
       drawControls(false);
       drawTray(null);
-      cardAt(tagCard('turn' + t.player, 'PLAYER ' + t.player + "'S TURN", 34, PINK[t.player]), 22, 96);
+      cardAt(tagCard('turn' + t.player + cpuOn(), t.player === 2 && cpuOn() ? "CPU'S TURN" : 'PLAYER ' + t.player + "'S TURN", 34, PINK[t.player]), 22, 96);
       const busy = t.state === 'result' || t.state === 'clear';
       if (t.state === 'aim' || t.state === 'build') drawTimer(t);
       const oc = CL.card('ord' + t.order.k, [{ t: 'ORDER: MAKE A...', px: 28, col: RUST }, { t: t.order.name, px: 42, col: INK }].concat(t.order.sub ? [{ t: '(' + t.order.sub + ')', px: 28, col: INK }] : []), { minW: 380, padY: 12 });

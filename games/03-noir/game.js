@@ -454,6 +454,59 @@
     for (let i = 0; i < N; i++) { const on = S.cursor[0] === i || S.cursor[1] === i; S.lift[i] += ((on ? 1 : 0) - S.lift[i]) * Math.min(1, dt * 12); }
     S.shown += (S.score - S.shown) * Math.min(1, dt * 4); if (Math.abs(S.score - S.shown) < 0.02) S.shown = S.score;
   }
+  function moveCursor(k, mv) {
+    S.cursor[k] = (S.cursor[k] + mv + N) % N; S.talk = { j: S.cursor[k], t0: S.clock, real: S.cleared.has(S.cursor[k]) };
+    GS.sfx('tock', { f: k === 0 ? 640 : 760, gain: 0.35, pan: k === 0 ? -0.4 : 0.4 });
+  }
+  function pinAt(k) {
+    const j = S.cursor[k];
+    if (S.cleared.has(j)) { GS.sfx('error', { gain: 0.5 }); S.clearedMsg = S.clock; return; }
+    S.pins[k] = j; GS.sfx('click', { gain: 0.8, pan: k === 0 ? -0.4 : 0.4 }); GS.sfx('thud', { f: 200, gain: 0.25 });
+    if (!S.talk || S.talk.j !== j) S.talk = { j, t0: S.clock, real: false };
+  }
+
+  // ---------- CPU sidekick (Player 2 when nobody is there). Co-op: a sidekick, never the solver. ----------
+  // Never pins first. Backs up P1's pin after a human-like delay (walking the cursor along the line-up), with a quip.
+  // Idle: wanders and questions a random suspect now and then (only when P1 isn't reading). If P1 does nothing for
+  // 12 s it "has a hunch" and walks to the culprit to question them: a hint, never a pin.
+  const QUIPS_BACK = ['If you say so, partner.', 'Your call, gumshoe.', 'I\'m right behind you.', 'Book \'em. I\'ll hold the door.', 'Gut says yes. Let\'s roll.'];
+  const QUIPS_HUNCH = ['I\'ve got a hunch about this one...', 'Psst. Ask this one again.', 'Something smells fishy over here.'];
+  function cpuSay(text, hold = 2.6) { S.cpuQuip = { text, t0: S.clock, hold }; }
+  function cpuBrain(dt, skill) {
+    const B = S.cpu || (S.cpu = { target: null, mode: null, stepT: 0, wait: 0, wanderAt: S.clock + 4, hunched: -1 });
+    if (B.caseKey !== S.caseT) { B.caseKey = S.caseT; B.target = null; B.mode = null; B.hunched = false; B.wanderAt = S.clock + 4 + Math.random() * 3; if (S.pins[1] != null) S.pins[1] = null; }
+    const react = 1 + (1 - skill) * 1.1;           // 1.0 s (skill 1) .. ~2 s (skill 0.1); 1.3 s at the co-op 0.75
+    const stepGap = 0.34 - 0.2 * skill;             // cursor speed along the line-up
+    const p1Pin = S.pins[0];
+    // 1) back up Player 1's pin
+    if (p1Pin != null && S.pins[1] !== p1Pin) {
+      if (B.mode !== 'back' || B.target !== p1Pin) { B.mode = 'back'; B.target = p1Pin; B.wait = S.clock + react * (0.6 + 0.4 * Math.random()); B.said = false; }
+    } else if (B.mode === 'back' && p1Pin == null) { B.mode = null; B.target = null; if (S.pins[1] != null) S.pins[1] = null; }
+    // 2) a hunch after 12 s of P1 doing nothing (once per case; never in training, which already shows the hint)
+    const idle = S.clock - Math.max(S.p1Act || 0, S.caseT);
+    if (B.mode == null && !B.hunched && S.mode === 'test' && idle > 12) {
+      const j = idxOf(S.cs.ans); B.hunched = true; B.mode = 'hunch'; B.target = j; B.wait = S.clock + 0.3;
+    }
+    // 3) wander and question someone now and then, only when P1 isn't busy reading
+    if (B.mode == null && !B.hunched && S.clock > B.wanderAt && idle > 4 && p1Pin == null && (!S.talk || S.clock - S.talk.t0 > 5)) {
+      let j; do { j = Math.floor(Math.random() * N); } while (j === S.cursor[1]);
+      B.mode = 'wander'; B.target = j; B.wait = S.clock;
+    }
+    if (B.mode == null || S.clock < B.wait) return;
+    if (S.clock - B.stepT < stepGap) return;
+    B.stepT = S.clock;
+    const cur = S.cursor[1];
+    if (cur !== B.target) {                          // walk one suspect at a time; only the arrival "questions" (sets talk)
+      const d = ((B.target - cur + N) % N) <= N / 2 ? 1 : -1;
+      S.cursor[1] = (cur + d + N) % N;
+      GS.sfx('tock', { f: 760, gain: 0.25, pan: 0.4 });
+      if (S.cursor[1] === B.target && B.mode !== 'back') { S.talk = { j: B.target, t0: S.clock, real: S.cleared.has(B.target) }; if (B.mode === 'hunch') cpuSay(QUIPS_HUNCH[Math.floor(Math.random() * QUIPS_HUNCH.length)], 5); }
+      return;
+    }
+    if (B.mode === 'back') { cpuSay(QUIPS_BACK[Math.floor(Math.random() * QUIPS_BACK.length)]); pinAt(1); B.mode = null; B.target = null; return; }
+    B.mode = null; B.target = null; B.wanderAt = S.clock + 6 + Math.random() * 5;
+  }
+
   function updateCase(dt) {
     const training = S.mode === 'training';
     if (S.res) {
@@ -475,14 +528,12 @@
       let mv = 0;
       if (GS.hit(p, 'left') || GS.hit(p, 'up')) mv = -1;
       if (GS.hit(p, 'right') || GS.hit(p, 'down')) mv = 1;
-      if (mv) { S.cursor[k] = (S.cursor[k] + mv + N) % N; S.talk = { j: S.cursor[k], t0: S.clock, real: S.cleared.has(S.cursor[k]) }; GS.sfx('tock', { f: p === 1 ? 640 : 760, gain: 0.35, pan: p === 1 ? -0.4 : 0.4 }); }
-      if (GS.hit(p, 'a')) {
-        const j = S.cursor[k];
-        if (S.cleared.has(j)) { GS.sfx('error', { gain: 0.5 }); S.clearedMsg = S.clock; }
-        else { S.pins[k] = j; GS.sfx('click', { gain: 0.8, pan: p === 1 ? -0.4 : 0.4 }); GS.sfx('thud', { f: 200, gain: 0.25 }); if (!S.talk || S.talk.j !== j) S.talk = { j, t0: S.clock, real: false }; }
-      }
+      if (mv) moveCursor(k, mv);
+      if (GS.hit(p, 'a')) pinAt(k);
       if (GS.hit(p, 'b') && S.pins[k] != null) { S.pins[k] = null; GS.sfx('swish', { gain: 0.4 }); }
+      if (p === 1 && (mv || GS.hit(1, 'a') || GS.hit(1, 'b'))) S.p1Act = S.clock;
     }
+    if (GS.cpu && GS.cpu.on) cpuBrain(dt, GS.cpu.skill);
     if (S.pins[0] != null && S.pins[1] != null) {
       if (S.pins[0] === S.pins[1]) accuse(S.pins[0]);
       else if (S.clock - S.disagree > 2.4) { S.disagree = S.clock; GS.sfx('buzz', { f: 140, dur: 0.15, gain: 0.35 }); }
@@ -596,7 +647,7 @@
     // cursors
     if (!res) {
       const same = S.cursor[0] === S.cursor[1];
-      for (let k = 0; k < 2; k++) { const x = mugX(S.cursor[k]) + (same ? (k ? 36 : -36) : 0); tag(c, x, ROW_Y - MUG_W * 0.625 - 22, 'P' + (k + 1), k === 1); }
+      for (let k = 0; k < 2; k++) { const x = mugX(S.cursor[k]) + (same ? (k ? 36 : -36) : 0); tag(c, x, ROW_Y - MUG_W * 0.625 - 22, k === 1 && GS.cpu && GS.cpu.on ? 'CPU' : 'P' + (k + 1), k === 1); }
     }
   }
 
@@ -659,7 +710,7 @@
     }
     if (!who) {
       const L = training
-        ? ['Move along the line-up:  P1  A / D    P2  ← / →', 'Each suspect you visit makes a statement.', 'Pin the culprit:  P1  F    P2  Enter', 'BOTH pins on ONE suspect = ARREST!']
+        ? (GS.cpu && GS.cpu.on ? ['Move along the line-up:  A / D', 'Each suspect you visit makes a statement.', 'Pin the culprit with  F.', 'Your CPU partner backs your pin = ARREST!'] : ['Move along the line-up:  P1  A / D    P2  ← / →', 'Each suspect you visit makes a statement.', 'Pin the culprit:  P1  F    P2  Enter', 'BOTH pins on ONE suspect = ARREST!'])
         : ['Question the suspects: move along the line-up.', 'Read each statement. Check the evidence.', 'Both detectives pin the SAME suspect to arrest.'];
       c.font = F.osw(26, 400); c.fillStyle = gy(235);
       L.forEach((l, i) => { fit(c, l, (s) => F.osw(s, 400), 27, P.w - 48, 20); c.fillText(l, P.x + 24, P.y + 98 + i * 50); });
@@ -673,10 +724,11 @@
     // co-op prompts
     if (!res) {
       let msg = null;
-      if (S.pins[0] != null && S.pins[1] != null && S.pins[0] !== S.pins[1]) msg = 'P1 pinned ' + SUSPECTS[S.pins[0]].id + ', P2 pinned ' + SUSPECTS[S.pins[1]].id + ': AGREE on one!';
-      else if (S.pins[0] != null && S.pins[1] == null) msg = 'P1 pinned ' + SUSPECTS[S.pins[0]].id + '. P2: pin them too (Enter)?';
-      else if (S.pins[1] != null && S.pins[0] == null) msg = 'P2 pinned ' + SUSPECTS[S.pins[1]].id + '. P1: pin them too (F)?';
+      if (S.pins[0] != null && S.pins[1] != null && S.pins[0] !== S.pins[1]) msg = 'P1 pinned ' + SUSPECTS[S.pins[0]].id + ', ' + P2N() + ' pinned ' + SUSPECTS[S.pins[1]].id + ': AGREE on one!';
+      else if (S.pins[0] != null && S.pins[1] == null) msg = 'P1 pinned ' + SUSPECTS[S.pins[0]].id + (GS.cpu && GS.cpu.on ? '. Your partner is thinking it over...' : '. P2: pin them too (Enter)?');
+      else if (S.pins[1] != null && S.pins[0] == null) msg = P2N() + ' pinned ' + SUSPECTS[S.pins[1]].id + '. P1: pin them too (F)?';
       else if (S.clearedMsg && S.clock - S.clearedMsg < 1.5) msg = 'That suspect is already cleared.';
+      if (GS.cpu && GS.cpu.on && S.cpuQuip && S.clock - S.cpuQuip.t0 < S.cpuQuip.hold) msg = 'CPU partner: "' + S.cpuQuip.text + '"';
       if (msg && !(tk && tk.real && S.clock - S.wrongT < 3)) {
         c.fillStyle = gy(0, 0.6); c.fillRect(P.x + 12, P.y + P.h - 60, P.w - 24, 46);
         fit(c, msg, F.osw, 26, P.w - 48, 18); c.fillStyle = gy(250); c.fillText(msg, P.x + 24, P.y + P.h - 27);
@@ -685,6 +737,7 @@
     c.restore();
   }
 
+  const P2N = () => (GS.cpu && GS.cpu.on ? 'CPU' : 'P2');
   function drawCaseScene(c, mode) {
     c.drawImage(getCork(), 0, 0);
     drawCaseCard(c, mode);
@@ -837,7 +890,7 @@
   // ================= main loop =================
   let last = performance.now();
   function frame(now) {
-    const dt = Math.min(0.05, (now - last) / 1000); last = now; amb += dt;
+    const dt = Math.min(0.1, (now - last) / 1000); last = now; amb += dt;
     const t0p = performance.now();
     try {
       if (GS.running) update(dt);

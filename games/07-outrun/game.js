@@ -119,7 +119,7 @@
       cars: [{ x: -2, vx: 0, roll: 0, shield: 0, glow: 0 }, { x: 2, vx: 0, roll: 0, shield: 0, glow: 0 }],
       score: 0, streak: 0, mult: 1, rows: [], dist: 0, v: 8, pops: [], shake: 0, flashR: 0, flashG: 0,
       beat: -1, ready: [false, false], test: null, banner: null, last: null, vt: S ? S.vt : 0, tier: 0,
-      attract: { next: 0.5, recent: [] },
+      attract: { next: 0.5, recent: [] }, brain: { row: null, wait: 0, target: null, err: 0 }, cpuReadyT: -1, cpuStats: { n: 0, ok: 0 }, p1Stats: { n: 0, ok: 0 },
     };
   }
   S = fresh();
@@ -148,6 +148,8 @@
     for (let i = 0; i < 2; i++) {
       const c = S.cars[i], idx = gateIdx(row, c.x), ok = row.q[i].ans.includes(idx);
       row.res[i] = { idx, ok };
+      if (i === 1 && GS.cpu && GS.cpu.on && mode === 'test') { S.cpuStats.n++; if (ok) S.cpuStats.ok++; }
+      if (i === 0 && mode === 'test') { S.p1Stats.n++; if (ok) S.p1Stats.ok++; }
       if (mode === 'attract') continue;
       const sx = carSX(i), pan = cl((sx - 640) / 640, -0.8, 0.8);
       if (ok) {
@@ -222,6 +224,58 @@
     }
   }
 
+  // ---- CPU partner (co-op sidekick): drives car 2 only, carries its own cargo, never steers the human's car.
+  const cpuOn = () => !!(GS.cpu && GS.cpu.on && GS.running);
+  function cpuBrain(dt, skill) {
+    const B = S.brain, r = active(), c = S.cars[1];
+    if (r !== B.row) {
+      B.row = r; B.target = null; B.err = (rand() - 0.5) * 0.9 * (1 - skill);
+      B.wait = lerp(1.4, 0.35, (skill - 0.1) / 0.85) * (0.8 + rand() * 0.5);
+    }
+    if (r && B.target == null) {
+      // shared questions: let the human read and decide first; the CPU only moves in the last ~1.6 s
+      const late = r.shared && GS.phase === 'play' ? r.z > CARZ + S.v * 1.6 : false;
+      if (!late) { B.wait -= dt; }
+      if (!late && B.wait <= 0) {
+        const q = r.q[1];
+        if (r.guided || GS.phase === 'learn') B.target = q.target;
+        else if (rand() < 0.6 + 0.35 * skill) {
+          // right answer; with two right gates (compost) prefer the one P1 is not in
+          const p1 = gateIdx(r, S.cars[0].x), opts = q.ans.filter((k) => k !== p1);
+          B.target = opts.length ? pick(opts) : q.ans[0];
+        } else {
+          const wrong = r.opts.map((o, k) => k).filter((k) => !q.ans.includes(k));
+          B.target = wrong.length ? pick(wrong) : q.ans[0];
+        }
+      }
+    }
+    let tx = c.x;
+    if (r && B.target != null) { const gw = 2 * RW / r.N; tx = -RW + (B.target + 0.5) * gw + B.err * gw * 0.35; }
+    else if (!r) tx = cl(S.cars[0].x + (S.cars[0].x < 0 ? 2.4 : -2.4), -XMAX, XMAX); // drift to a free lane between rows
+    const d = tx - c.x, maxDir = lerp(0.55, 1, (skill - 0.1) / 0.85);
+    steer(dt, 1, Math.abs(d) < 0.12 ? 0 : cl(d * 1.4, -maxDir, maxDir));
+    // LEARN: ready a second after Player 1
+    const b = BEATS[S.beat];
+    if (GS.phase === 'learn' && b && b.k === 'ready' && S.ready[0] && !S.ready[1]) {
+      if (S.cpuReadyT < 0) S.cpuReadyT = 1.0;
+      S.cpuReadyT -= dt; if (S.cpuReadyT <= 0) { S.ready[1] = true; GS.sfx('select', { gain: 0.7 }); }
+    }
+  }
+  function steerHumans(dt) {
+    for (let i = 0; i < 2; i++) {
+      if (i === 1 && cpuOn()) { cpuBrain(dt, GS.cpu.skill); continue; }
+      if (AUTO && i === 0) { autopilot1(dt); continue; }
+      if (AUTO && !cpuOn()) { autopilot1(dt, 1); continue; }
+      const p = i + 1; steer(dt, i, (GS.held(p, 'right') ? 1 : 0) - (GS.held(p, 'left') ? 1 : 0));
+    }
+  }
+  function autopilot1(dt, i = 0) { // test helper (?auto=1): perfect driver for one car
+    const r = active(); let tx = i ? 2 : -2;
+    if (r) { const gw = 2 * RW / r.N; tx = -RW + (r.q[i].target + 0.5) * gw + (i ? 0.25 : -0.25); }
+    const d = tx - S.cars[i].x; steer(dt, i, Math.abs(d) < 0.12 ? 0 : cl(d * 1.5, -1, 1));
+    if (AUTO && i === 0 && BEATS[S.beat] && BEATS[S.beat].k === 'ready' && !S.ready[0] && GS.phase === 'learn') S.ready[0] = true;
+  }
+
   function updateAttract(dt) {
     S.v = 10; const A = S.attract;
     autopilot(dt);
@@ -243,9 +297,7 @@
       } else if (b.k !== 'ready') GS.sfx('neon', { gain: 0.35 });
       if (b.k === 'title') GS.sfx('impact', { gain: 0.6 });
     }
-    if (AUTO) autopilot(dt); else for (let i = 0; i < 2; i++) {
-      const p = i + 1; steer(dt, i, (GS.held(p, 'right') ? 1 : 0) - (GS.held(p, 'left') ? 1 : 0));
-    }
+    steerHumans(dt);
     if (BEATS[bi].k === 'ready') {
       for (let i = 0; i < 2; i++) if (GS.hit(i + 1, 'a') && !S.ready[i]) { S.ready[i] = true; GS.sfx('select', { gain: 0.7 }); }
       if (S.ready[0] && S.ready[1]) GS.skipLearn();
@@ -264,7 +316,7 @@
     S.v = lerp(9, 16, d);
     const tier = d < 0.33 ? 0 : d < 0.66 ? 1 : 2;
     if (tier > S.tier) { S.tier = tier; pop('SPEED UP!', ORANGE, 640, 380, { px: 44, life: 1.4 }); GS.sfx('riser', { gain: 0.6 }); }
-    if (AUTO) autopilot(dt); else for (let i = 0; i < 2; i++) { const p = i + 1; steer(dt, i, (GS.held(p, 'right') ? 1 : 0) - (GS.held(p, 'left') ? 1 : 0)); }
+    steerHumans(dt);
     if (!active()) {
       T.next -= dt;
       if (T.next <= 0) {
@@ -452,11 +504,12 @@
     if (q.sub) D.neonText(g, q.sub, 90, 78, F(24, 500), col, 1, 'left');
     s = { c, w: c.width, h: c.height }; D.SPR.set(key, s); return s;
   }
+  const pName = (p) => (p === 1 && GS.cpu && GS.cpu.on ? 'CPU' : 'P' + (p + 1));
   function chipDraw(x, y, p, filled, a = 1) {
     ctx.save(); ctx.globalAlpha = a;
     const box = () => ctx.roundRect(x - 34, y - 18, 68, 36, 10);
-    if (filled) { ctx.fillStyle = H.rgba(H.mix(PCOL[p], '#000000', 0.55), 0.95); ctx.beginPath(); box(); ctx.fill(); D.neonStroke(ctx, PCOL[p], 1.4, box); D.drawSpr(ctx, D.neonSpr('P' + (p + 1), 24, '#ffffff'), x, y); }
-    else { ctx.setLineDash([6, 5]); ctx.strokeStyle = PCOL[p]; ctx.lineWidth = 2; ctx.beginPath(); box(); ctx.stroke(); ctx.setLineDash([]); D.drawSpr(ctx, D.neonSpr('P' + (p + 1), 24, PCOL[p]), x, y, 0.55); }
+    if (filled) { ctx.fillStyle = H.rgba(H.mix(PCOL[p], '#000000', 0.55), 0.95); ctx.beginPath(); box(); ctx.fill(); D.neonStroke(ctx, PCOL[p], 1.4, box); D.drawSpr(ctx, D.neonSpr(pName(p), 24, '#ffffff'), x, y); }
+    else { ctx.setLineDash([6, 5]); ctx.strokeStyle = PCOL[p]; ctx.lineWidth = 2; ctx.beginPath(); box(); ctx.stroke(); ctx.setLineDash([]); D.drawSpr(ctx, D.neonSpr(pName(p), 24, PCOL[p]), x, y, 0.55); }
     ctx.restore();
   }
   function boardLayout(row) {
@@ -602,11 +655,11 @@
       D.drawSpr(ctx, D.chromeSpr('READY?', 92), 640, 180, cl(p * 4), 1 + 1.2 * Math.pow(1 - p, 3));
       D.drawSpr(ctx, D.neonSpr('BOTH PRESS YOUR A BUTTON TO START THE TEST', 30, YEL, 1200), 640, 268, D.flick(bt, 0.4));
       D.drawSpr(ctx, D.neonSpr('P1: F', 34, PCOL[0]), 470, 336, D.flick(bt, 0.6));
-      D.drawSpr(ctx, D.neonSpr('P2: ENTER', 34, PCOL[1]), 810, 336, D.flick(bt, 0.6));
+      D.drawSpr(ctx, D.neonSpr(GS.cpu && GS.cpu.on ? 'CPU' : 'P2: ENTER', 34, PCOL[1]), 810, 336, D.flick(bt, 0.6));
       for (let i = 0; i < 2; i++) D.drawSpr(ctx, D.neonSpr(S.ready[i] ? '✓ READY' : '...', 28, S.ready[i] ? OK : '#7a6aa8'), i ? 810 : 470, 380);
     }
     // controls, always on screen in LEARN
-    const c1 = D.neonSpr('P1 PINK CAR: A / D TO STEER', 24, PCOL[0]), c2 = D.neonSpr('P2 CYAN CAR: \u2190 / \u2192 TO STEER', 24, PCOL[1]);
+    const c1 = D.neonSpr('P1 PINK CAR: A / D TO STEER', 24, PCOL[0]), c2 = D.neonSpr(GS.cpu && GS.cpu.on ? 'CPU CYAN CAR: \u2190 / \u2192 TO TAKE OVER' : 'P2 CYAN CAR: \u2190 / \u2192 TO STEER', 24, PCOL[1]);
     D.drawSpr(ctx, c1, 1240 - c2.tw - 50 - c1.tw / 2, 698); D.drawSpr(ctx, c2, 1240 - c2.tw / 2, 698);
   }
 
@@ -652,7 +705,9 @@
     id: 7, title: 'Recycle Run', mode: 'coop', learnSeconds: 90,
     controls: { p1: 'A / D steer the pink car (F = ready)', p2: '← / → steer the cyan car (Enter = ready)' },
     onRound() { resetRound(); },
+    onPause() {},
     onPhase(p, prev) { if (p === 'play') startTest(); if (p === 'idle') resetRound(); },
   });
+  window.RRstats = () => ({ cpu: S.cpuStats, p1: S.p1Stats, score: S.score });
   requestAnimationFrame(frame);
 })();

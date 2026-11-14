@@ -381,7 +381,7 @@
     for (let i = 0; i < 2; i++) {
       const k = I(0.5) * N.ign(t, S.scoreT[i], 0.25);
       if (i === 0) { N.text('P1', 40, 104, 30, 'P', C.violet, I(0.5), { align: 'left' }); N.text(String(S.scores[0]), 90, 108, 64, 'G', C.pink, k, { align: 'left' }); }
-      else { N.text('P2', 1240, 104, 30, 'P', C.violet, I(0.5), { align: 'right' }); N.text(String(S.scores[1]), 1190, 108, 64, 'G', C.pink, k, { align: 'right' }); }
+      else { const cpu = GS.cpu && GS.cpu.on && GS.phase !== 'idle'; N.text(cpu ? 'CPU' : 'P2', 1240, 104, 30, 'P', C.violet, I(0.5), { align: 'right' }); N.text(String(S.scores[1]), cpu ? 1170 : 1190, 108, 64, 'G', C.pink, k, { align: 'right' }); }
     }
     // the card: what the ball is
     const kc = I(0.7);
@@ -460,8 +460,11 @@
       const kl = I(0.6) * (S.kind === 'test' ? 0.55 : 0.95);
       N.text('F = FORMING', 104, 568, 24, 'P', C.cyan, kl, { align: 'left' });
       N.text('G = SETTING', 104 + N.measure('F = FORMING', 24, 'P') + 26, 568, 24, 'P', C.hot, kl, { align: 'left' });
-      N.text('R-Shift = SETTING', 1176, 568, 24, 'P', C.hot, kl, { align: 'right' });
-      N.text('Enter = FORMING', 1176 - N.measure('R-Shift = SETTING', 24, 'P') - 26, 568, 24, 'P', C.cyan, kl, { align: 'right' });
+      if (GS.cpu && GS.cpu.on) N.text('CPU playing \u00b7 any P2 key to join', 1176, 568, 24, 'P', C.violet, kl, { align: 'right' });
+      else {
+        N.text('R-Shift = SETTING', 1176, 568, 24, 'P', C.hot, kl, { align: 'right' });
+        N.text('Enter = FORMING', 1176 - N.measure('R-Shift = SETTING', 24, 'P') - 26, 568, 24, 'P', C.cyan, kl, { align: 'right' });
+      }
     }
     if (S.kind === 'practice' && !S.flash) {
       if (S.readyT >= 0) N.text('Ready! Test starting…', 640, 400, 64, 'G', C.green, N.ign(t, S.readyT, 0.3));
@@ -489,6 +492,44 @@
     }
   }
 
+  // ---------------- CPU Player 2 (bridge: GS.cpu) ----------------
+  // Sees only what a player sees: the ball's position/velocity and its label. Decides FORMING/SETTING when the ball
+  // crosses the half-way line (right with p = 0.35 + 0.6*skill), re-reads the ball's path every reaction interval,
+  // aims at the predicted intercept with an error, and moves with capped speed by pulsing the virtual up/down keys.
+  const CPUS = { seen: null, decided: null, pressAt: -1, pressBtn: null, nextLook: 0, ty: MIDY, duty: 0, wasOn: false };
+  function predictY(b, x) {
+    const t = (x - b.x) / b.vx; if (!(t > 0)) return b.y;
+    const lo = TOP + b.hh, hi = BOT - b.hh, span = hi - lo;
+    let y = b.y + b.vy * t - lo; y = ((y % (2 * span)) + 2 * span) % (2 * span); if (y > span) y = 2 * span - y;
+    return lo + y;
+  }
+  function runCpu(dt) {
+    const on = !!(GS.cpu && GS.cpu.on && GS.running);
+    if (on) cpuBrain(dt, GS.cpu.skill); else if (CPUS.wasOn && GS.cpu) GS.cpu.releaseAll();
+    CPUS.wasOn = on;
+  }
+  function cpuBrain(dt, skill) {
+    const u = H.clamp((skill - 0.1) / 0.85), react = H.lerp(1.4, 0.35, u), p = S.pads[1], b = S.ball;
+    const live = b && b.wait <= 0 && !S.flash, towards = live && b.vx > 0 && b.passed < 0;
+    // 1) content decision, made at the half-way line for each new label
+    if (towards && b.x >= 640 && CPUS.decided !== b.item) {
+      CPUS.decided = b.item;
+      const right = Math.random() < 0.35 + 0.6 * skill, m = right ? b.item.fam : b.item.fam === FORM ? SET : FORM;
+      CPUS.pressBtn = m === FORM ? 'a' : 'b'; CPUS.pressAt = S.at + react * (0.25 + Math.random() * 0.35);
+    }
+    if (CPUS.pressAt >= 0 && S.at >= CPUS.pressAt) { GS.cpu.press(CPUS.pressBtn); CPUS.pressAt = -1; }
+    // 2) movement: look again every reaction interval, aim at the predicted intercept with an error
+    if (S.at >= CPUS.nextLook) {
+      CPUS.nextLook = S.at + react * (0.5 + Math.random() * 0.5);
+      if (towards) CPUS.ty = predictY(b, PX[1] - FACE - b.hw) + (Math.random() - 0.5) * 2 * H.lerp(95, 12, u);
+      else CPUS.ty = H.lerp(MIDY, live ? b.y : MIDY, 0.3) + (Math.random() - 0.5) * 40;
+    }
+    const d = CPUS.ty - p.y, dead = H.lerp(26, 8, u);
+    // speed cap: hold the key only for part of the time (0.5 of full speed at skill 0.1, 0.95 at 0.95)
+    CPUS.duty += dt * 10; const onFrac = H.lerp(0.5, 0.95, u), pulse = (CPUS.duty % 1) < onFrac;
+    GS.cpu.hold('down', d > dead && pulse); GS.cpu.hold('up', d < -dead && pulse);
+  }
+
   // ---------------- lifecycle ----------------
   function startTest() {
     S.kind = 'test'; S.scores = [0, 0]; S.scoreT = [-9, -9]; GS.score(0, 0);
@@ -500,7 +541,7 @@
   GS.init({
     id: 2, title: 'Heat Pong', mode: 'vs', learnSeconds: 90,
     controls: { p1: 'W / S move · F = FORMING · G = SETTING', p2: '↑ / ↓ move · Enter = FORMING · Right Shift = SETTING' },
-    onRound() { S = fresh(); S.kind = 'intro'; cam = 0; GS.score(0, 0); },
+    onRound() { S = fresh(); CPUS.decided = null; CPUS.pressAt = -1; CPUS.ty = MIDY; S.kind = 'intro'; cam = 0; GS.score(0, 0); },
     onPhase(p, prev) {
       if (p === 'play') startTest();
       if (p === 'idle') { S = fresh(); }
@@ -510,7 +551,9 @@
   let learnL = 90;
   function camFor(sT) { let c = 0; for (const [a, b] of PANS) c += 1280 * E.inOut(sm(a, b, sT)); return c; }
   let lastHeat = false;
-  const DBG = (window.HEATPONG = { ms: 0, state: () => S, goal: (i) => S.ball && goal(i) });
+  const DBG = (window.HEATPONG = { ms: 0, state: () => S, goal: (i) => S.ball && goal(i),
+    // headless test helper: run the test-phase logic for `sec` game seconds at 60 Hz, p1(S) may steer Player 1
+    sim: (sec, p1) => { for (let i = 0; i < sec * 60; i++) { const dt = 1 / 60; S.at += dt; if (p1) p1(S); runCpu(dt); stepGame(dt, true); stepFx(dt); GS.endFrame(); } return S.scores.slice(); } });
   let last = performance.now();
   function frame(now) {
     const tStart = performance.now();
@@ -528,6 +571,7 @@
       if (GS.running) {
         if (S.prevS >= 0 && sT - S.prevS < 1) for (const [t0, name, p] of SFX) if (t0 > S.prevS && t0 <= sT) GS.sfx(name, p);
         S.prevS = sT;
+        runCpu(dt);
         if (sT >= ARENA_ON) stepPads(dt, true);
         if (sT >= PRACTICE_AT && !S.practiceStarted) { S.practiceStarted = true; S.kind = 'practice'; serve(1, 1.0); }
         if (S.practiceStarted) stepGame(dt, true);
@@ -535,7 +579,7 @@
       }
       cam = camFor(sT);
     } else if (ph === 'play') {
-      if (GS.running) { stepGame(dt, true); stepFx(dt); }
+      if (GS.running) { runCpu(dt); stepGame(dt, true); stepFx(dt); }
       cam = H.lerp(S.camFrom, ARENA, E.inOut(sm(S.camT0, S.camT0 + 0.7, S.at)));
     } else { cam = ARENA; }
     const h = heatOn(); if (h && !lastHeat) { S.heatOnT = S.at; if (S.kind === 'test') GS.sfx('riser', { dur: 0.6, gain: 0.5 }); } lastHeat = h;
