@@ -50,7 +50,7 @@ function route(p) {
     checkPin(p);
     const lock = LockService.getScriptLock(); lock.waitLock(5000);
     try {
-      const s = cmd(getS(), p.c, p, Date.now());
+      const s = cmd(getS(), p.op, p, Date.now());
       PROPS.setProperty('S', JSON.stringify(s));
       return { s: s };
     } finally { lock.releaseLock(); }
